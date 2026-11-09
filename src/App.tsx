@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { deleteWay, reverseWay } from './core/ops'
+import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
+import { DRAW_TEMPLATES } from './core/templates'
 import { hasErrors, validate, type Issue } from './validate'
+import { applyAutoFixes, applyFix } from './validate/fixes'
 import { AttributePanel } from './ui/AttributePanel'
 import { IssuesPanel } from './ui/IssuesPanel'
-import { MapView } from './ui/MapView'
+import { MapView, type Tool } from './ui/MapView'
 import { downloadText, pickOsmFile } from './ui/files'
+import { Icon } from './ui/icons'
 import { DEFAULT_TILE_URL } from './ui/tiles'
 
 export function App() {
@@ -19,15 +22,21 @@ export function App() {
   const [onlyRoads, setOnlyRoads] = useState(true)
   const [withPed, setWithPed] = useState(false)
   const [keepMeta, setKeepMeta] = useState(false)
-  const [issues, setIssues] = useState<Issue[]>([])
+  const [allIssues, setIssues] = useState<Issue[]>([])
+  const [ignored, setIgnored] = useState<Set<string>>(new Set())
+  // скрытые пользователем проблемы не показываем и не считаем при сохранении
+  const issues = useMemo(() => allIssues.filter((i) => !ignored.has(i.id)), [allIssues, ignored])
   const [focus, setFocus] = useState<{ lat: number; lon: number; n: number } | null>(null)
   const [status, setStatus] = useState('Откройте файл .osm или загрузите пример')
+  const [tool, setTool] = useState<Tool>('select')
+  const [tplIdx, setTplIdx] = useState(2)
 
   const load = useCallback((text: string, name: string) => {
     try {
       const t0 = performance.now()
       const doc = parseOsm(text)
       store.load(doc, name)
+      setIgnored(new Set())
       setStatus(`${name}: ${doc.nodes.size} узлов, ${doc.ways.size} путей, ${doc.relations.size} relations (${Math.round(performance.now() - t0)} мс)`)
     } catch (e) {
       setStatus('Ошибка чтения файла: ' + (e as Error).message)
@@ -53,8 +62,9 @@ export function App() {
 
   const save = useCallback(() => {
     if (!store.doc.nodes.size) return
-    const found = validate(store.doc)
-    setIssues(found)
+    const all = validate(store.doc)
+    setIssues(all)
+    const found = all.filter((i) => !ignored.has(i.id))
     const errors = found.filter((i) => i.severity === 'error')
     const warns = found.length - errors.length
     if (found.length > 0) {
@@ -69,7 +79,7 @@ export function App() {
     downloadText(`${base}.edited.osm`, text)
     store.dirty = false
     setStatus(`Сохранено ${base}.edited.osm (${(text.length / 1e6).toFixed(1)} МБ)`)
-  }, [onlyRoads, withPed, keepMeta])
+  }, [onlyRoads, withPed, keepMeta, ignored])
 
   // горячие клавиши
   useEffect(() => {
@@ -83,13 +93,35 @@ export function App() {
       else if (mod && key === 'y') { e.preventDefault(); store.redo() }
       else if (mod && key === 's') { e.preventDefault(); save() }
       else if (mod && key === 'o') { e.preventDefault(); open() }
-      else if (e.key === 'Escape') store.select(null)
-      else if (sel?.kind === 'way' && key === 'r' && !mod) reverseWay(store, sel.id)
-      else if (sel?.kind === 'way' && (e.key === 'Delete' || e.key === 'Backspace')) { deleteWay(store, sel.id); store.select(null) }
+      else if (mod) return
+      else if (e.key === 'Escape') store.select(null) // в режиме рисования Esc ещё и отменяет черновик (MapView)
+      // выбор инструмента
+      else if (key === 'v') setTool('select')
+      else if (key === 'd') setTool('draw')
+      else if (key === 'n') setTool('node')
+      // действия над выбранным объектом (в режиме рисования Backspace убирает точку, а не удаляет)
+      else if (sel?.kind === 'way' && key === 'r') reverseWay(store, sel.id)
+      else if (sel?.kind === 'node' && key === 's') {
+        const n = splitAtNode(store, sel.id)
+        setStatus(n ? `Разрезано дорог: ${n}` : 'В этом узле нечего резать (узел на конце дороги)')
+      }
+      else if (e.key === 'Delete' || (e.key === 'Backspace' && tool !== 'draw')) {
+        if (sel?.kind === 'way') { deleteWay(store, sel.id); store.select(null) }
+        else if (sel?.kind === 'node') { deleteNode(store, sel.id); store.select(null) }
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [save, open])
+  }, [save, open, tool])
+
+  // меню «Вид» и «Экспорт» закрываются кликом вне их
+  useEffect(() => {
+    const h = (e: PointerEvent) => document.querySelectorAll('details.menu[open]').forEach((d) => {
+      if (!d.contains(e.target as Node)) d.removeAttribute('open')
+    })
+    document.addEventListener('pointerdown', h)
+    return () => document.removeEventListener('pointerdown', h)
+  }, [])
 
   const focusIssue = (i: Issue) => {
     const wayFirst = i.wayIds?.[0] ? store.doc.ways.get(i.wayIds[0]) : undefined
@@ -98,49 +130,140 @@ export function App() {
     if (i.wayIds?.[0]) store.select({ kind: 'way', id: i.wayIds[0] })
   }
 
+  const fixOne = (i: Issue) => {
+    if (!i.fix) return
+    if (i.fix.kind === 'delete-ways' && !window.confirm(`Удалить ${i.fix.ids.length} дорог(и) этого участка?`)) return
+    applyFix(store, i.fix)
+    setStatus('Исправлено. Ctrl+Z — отменить')
+  }
+  const fixAll = () => {
+    const n = applyAutoFixes(store, issues)
+    setStatus(`Исправлено автоматически: ${n}. Ctrl+Z — отменить одним шагом`)
+  }
+  const ignoreOne = (i: Issue) => setIgnored(new Set(ignored).add(i.id))
+
   const errCount = useMemo(() => issues.filter((i) => i.severity === 'error').length, [issues])
   const loaded = store.doc.nodes.size > 0
 
+  const TOOLS: { id: Tool; icon: string; label: string; key: string }[] = [
+    { id: 'select', icon: 'select', label: 'Выбрать', key: 'V' },
+    { id: 'draw', icon: 'road', label: 'Дорога', key: 'D' },
+    { id: 'node', icon: 'node', label: 'Узел', key: 'N' },
+  ]
+
   return (
-    <div className="app">
-      <header>
-        <b>Редактор УДС</b>
-        <button onClick={open}>Открыть</button>
-        <button onClick={loadExample}>Пример</button>
-        <button onClick={save} disabled={!loaded}>Сохранить</button>
-        <span className="sep" />
-        <button onClick={() => store.undo()} disabled={!store.canUndo} title="Ctrl+Z">↶ Отменить</button>
-        <button onClick={() => store.redo()} disabled={!store.canRedo} title="Ctrl+Shift+Z">↷ Вернуть</button>
-        <span className="sep" />
-        <label><input type="checkbox" checked={showPed} onChange={(e) => setShowPed(e.target.checked)} /> пешеходные</label>
-        <label><input type="checkbox" checked={tiles} onChange={(e) => setTiles(e.target.checked)} /> подложка</label>
-        <input className="tileurl" value={tileUrl} onChange={(e) => setTileUrl(e.target.value)} title="Шаблон URL тайлов {z}/{x}/{y}" />
-        <span className="sep" />
-        <span className="export">
-          Экспорт:
-          <label><input type="checkbox" checked={onlyRoads} onChange={(e) => setOnlyRoads(e.target.checked)} /> только дороги</label>
-          <label><input type="checkbox" checked={withPed} disabled={!onlyRoads} onChange={(e) => setWithPed(e.target.checked)} /> + пешеходные</label>
-          <label><input type="checkbox" checked={keepMeta} onChange={(e) => setKeepMeta(e.target.checked)} /> метаданные</label>
-        </span>
+    <div
+      className="app"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={async (e) => {
+        e.preventDefault()
+        const f = e.dataTransfer.files[0]
+        if (f) load(await f.text(), f.name)
+      }}
+    >
+      <header className="topbar">
+        <div className="brand"><Icon name="road" size={20} /> Редактор УДС</div>
+
+        <div className="group">
+          <button className="btn" onClick={open} title="Ctrl+O"><Icon name="open" /> Открыть</button>
+          <button className="btn ghost" onClick={loadExample}>Пример</button>
+          <button className="btn primary" onClick={save} disabled={!loaded} title="Ctrl+S"><Icon name="save" /> Сохранить</button>
+        </div>
+
+        <div className="group">
+          <button className="btn icon" onClick={() => store.undo()} disabled={!store.canUndo} title="Отменить (Ctrl+Z)"><Icon name="undo" /></button>
+          <button className="btn icon" onClick={() => store.redo()} disabled={!store.canRedo} title="Вернуть (Ctrl+Shift+Z)"><Icon name="redo" /></button>
+        </div>
+
+        <span className="spacer" />
+
+        <details className="menu">
+          <summary><Icon name="layers" /> Вид <Icon name="chevron" size={14} /></summary>
+          <div className="popover">
+            <label><input type="checkbox" checked={showPed} onChange={(e) => setShowPed(e.target.checked)} /> Пешеходные дорожки</label>
+            <label><input type="checkbox" checked={tiles} onChange={(e) => setTiles(e.target.checked)} /> Подложка (карта)</label>
+            <div className="field">
+              <span>Адрес тайлов {'{z}/{x}/{y}'}</span>
+              <input value={tileUrl} onChange={(e) => setTileUrl(e.target.value)} />
+            </div>
+          </div>
+        </details>
+
+        <details className="menu">
+          <summary><Icon name="export" /> Экспорт <Icon name="chevron" size={14} /></summary>
+          <div className="popover">
+            <label><input type="checkbox" checked={onlyRoads} onChange={(e) => setOnlyRoads(e.target.checked)} /> Только дороги (без зданий и маршрутов)</label>
+            <label><input type="checkbox" checked={withPed} disabled={!onlyRoads} onChange={(e) => setWithPed(e.target.checked)} /> Добавить пешеходные</label>
+            <label><input type="checkbox" checked={keepMeta} onChange={(e) => setKeepMeta(e.target.checked)} /> Сохранить метаданные OSM</label>
+          </div>
+        </details>
       </header>
 
       <main>
-        <MapView tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus} />
-        {!loaded && <div className="empty">Откройте файл .osm или нажмите «Пример»</div>}
+        <div className="stage">
+          <MapView
+            tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus}
+            tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+          />
+
+          <div className="palette">
+            {TOOLS.map((t) => (
+              <button key={t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label} (${t.key})`}>
+                <Icon name={t.icon} size={20} />
+                <kbd>{t.key}</kbd>
+              </button>
+            ))}
+          </div>
+
+          {tool === 'draw' && (
+            <div className="tool-card">
+              <b>Новая дорога</b>
+              <select value={tplIdx} onChange={(e) => setTplIdx(+e.target.value)} title="Тип новой дороги">
+                {DRAW_TEMPLATES.map((t, i) => <option key={t.name} value={i}>{t.name}</option>)}
+              </select>
+              <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена</span>
+            </div>
+          )}
+          {tool === 'node' && (
+            <div className="tool-card"><b>Узел на дороге</b><span>Кликните по дороге, чтобы поставить на неё узел</span></div>
+          )}
+
+          {!loaded && (
+            <div className="empty">
+              <div className="card">
+                <Icon name="road" size={36} />
+                <h2>Откройте карту</h2>
+                <p>Перетащите файл <code>.osm</code> в окно или выберите его кнопкой.</p>
+                <div className="row">
+                  <button className="btn primary" onClick={open}><Icon name="open" /> Открыть .osm</button>
+                  <button className="btn" onClick={loadExample}>Загрузить пример</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         <aside>
           <nav>
             <button className={tab === 'attrs' ? 'active' : ''} onClick={() => setTab('attrs')}>Атрибуты</button>
             <button className={tab === 'issues' ? 'active' : ''} onClick={() => setTab('issues')}>
-              Проблемы {issues.length ? `(${issues.length})` : ''}{errCount ? ' ●' : ''}
+              Проблемы
+              {issues.length > 0 && <span className={errCount ? 'badge err' : 'badge'}>{issues.length}</span>}
             </button>
           </nav>
-          {tab === 'attrs' ? <AttributePanel /> : <IssuesPanel issues={issues} onFocus={focusIssue} />}
+          {tab === 'attrs' ? <AttributePanel /> : (
+            <IssuesPanel
+              issues={issues} hiddenCount={allIssues.length - issues.length}
+              onFocus={focusIssue} onFix={fixOne} onIgnore={ignoreOne} onFixAll={fixAll}
+              onShowHidden={() => setIgnored(new Set())}
+            />
+          )}
         </aside>
       </main>
 
       <footer>
-        <span>{status}{store.dirty ? ' · есть несохранённые изменения' : ''}</span>
-        <span className="keys">Ctrl+O открыть · Ctrl+S сохранить · Ctrl+Z / Ctrl+Shift+Z · R развернуть · Del удалить · Esc снять выделение</span>
+        <span className="status">{status}{store.dirty && <em> · есть несохранённые изменения</em>}</span>
+        <span className="keys">V выбрать · D дорога · N узел · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
       </footer>
     </div>
   )

@@ -112,6 +112,16 @@ export class Store {
     this.emit()
   }
 
+  /** Несколько правок = один шаг undo: store.group('Исправить всё', () => { opA(); opB() }). */
+  group(label: string, fn: () => void) {
+    const base = this.undoStack.length
+    fn()
+    const entries = this.undoStack.splice(base)
+    if (!entries.length) return
+    this.undoStack.push({ label, changes: entries.flatMap((e) => e.changes) })
+    this.emit()
+  }
+
   private apply(changes: Change[], dir: 'undo' | 'redo') {
     const list = dir === 'undo' ? [...changes].reverse() : changes
     for (const c of list) {

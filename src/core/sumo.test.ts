@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { moveNode, reverseWay } from './ops'
+import { drawRoad, moveNode, reverseWay } from './ops'
 import { parseOsm } from './parse'
 import { isDrivable } from './roads'
 import { serializeOsm } from './serialize'
@@ -32,5 +32,26 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
 
     const net = readFileSync(join(dir, 'out.net.xml'), 'utf8')
     expect(net).toContain('<edge ')
+  }, 60000)
+
+  it('нарисованная дорога с перекрёстком попадает в сеть SUMO', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    const target = [...s.doc.ways.values()].find((x) => isDrivable(x) && x.tags.highway === 'secondary' && x.nodes.length > 3)!
+    const a = s.doc.nodes.get(target.nodes[1])!
+    const b = s.doc.nodes.get(target.nodes[2])!
+    const mid = { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }
+    // новая дорога от середины существующей уходит в пустое место и там заканчивается
+    const id = drawRoad(s, [
+      { kind: 'way', wayId: target.id, ...mid },
+      { kind: 'new', lat: mid.lat + 0.0006, lon: mid.lon + 0.0006 },
+    ], { highway: 'residential', lanes: '2', maxspeed: '40' })
+
+    const dir = mkdtempSync(join(tmpdir(), 'uds-draw-'))
+    const osm = join(dir, 'drawn.osm')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
+    // SUMO называет рёбра по id дороги; новая дорога имеет отрицательный id
+    expect(readFileSync(join(dir, 'out.net.xml'), 'utf8')).toContain(`id="${id}`)
   }, 60000)
 })

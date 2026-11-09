@@ -10,6 +10,12 @@ import type { OsmDocument } from '../core/types'
 
 export type Severity = 'error' | 'warning'
 
+/** Описание исправления проблемы. Применяется через applyFix (src/validate/fixes.ts). */
+export type Fix =
+  | { kind: 'delete-relation'; id: number }
+  | { kind: 'merge-nodes'; keep: number; remove: number }
+  | { kind: 'delete-ways'; ids: number[] }
+
 export interface Issue {
   /** уникальный ключ проблемы */
   id: string
@@ -21,6 +27,10 @@ export interface Issue {
   wayIds?: number[]
   /** точка для подсветки на карте и перехода к проблеме */
   at?: { lat: number; lon: number }
+  /** как исправить; если нет — проблему можно только показать или скрыть */
+  fix?: Fix
+  /** исправление безопасно и применяется кнопкой «Исправить автоматически» */
+  auto?: boolean
 }
 
 /** Проверка получает документ и готовый транспортный граф (строится один раз на validate). */
@@ -61,6 +71,7 @@ const brokenRelations: Check = (doc) => {
       id: `broken-relation:${r.id}`, severity: 'error', code: 'broken-relation',
       message: `Запрет поворота ${r.id}${r.tags.restriction ? ' (' + r.tags.restriction + ')' : ''}: нет ${bad.length} из ${r.members.length} участников`,
       at: node ? { lat: node.lat, lon: node.lon } : undefined,
+      fix: { kind: 'delete-relation', id: r.id }, auto: true,
     })
   }
   return out
@@ -88,6 +99,7 @@ const duplicateNodes: Check = (doc) => {
         id: `dup-nodes:${ids.join(',')}`, severity: 'warning', code: 'duplicate-nodes', nodeIds: ids,
         message: `Узлы ${ids.join(', ')} находятся в одной точке (<1 м) — возможно, перекрёсток не склеен`,
         at: { lat: a.lat, lon: a.lon },
+        fix: { kind: 'merge-nodes', keep: ids[0], remove: ids[1] }, auto: true,
       })
     }
   }
@@ -123,6 +135,8 @@ const isolatedComponents: Check = (doc) => {
       id: `isolated:${wayIds[0]}`, severity: 'warning', code: 'isolated',
       message: `Изолированный участок из ${wayIds.length} дорог (первая: ${wayIds[0]}) не связан с основной сетью`,
       wayIds, at: n ? { lat: n.lat, lon: n.lon } : undefined,
+      // удалять участок целиком — решение человека (это может быть реальный двор), поэтому не auto
+      fix: { kind: 'delete-ways', ids: wayIds },
     })
   }
   return out

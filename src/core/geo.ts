@@ -15,6 +15,20 @@ export function unproject(x: number, y: number): { lat: number; lon: number } {
   return { lat, lon }
 }
 
+/**
+ * Ближайшая точка отрезка a–b к точке p (всё в метрах Меркатора).
+ * t — положение вдоль отрезка от 0 до 1, dist — расстояние от p до отрезка.
+ */
+export function nearestOnSegment(
+  p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number },
+): { x: number; y: number; t: number; dist: number } {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const l2 = dx * dx + dy * dy
+  const t = l2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2))
+  const x = a.x + t * dx, y = a.y + t * dy
+  return { x, y, t, dist: Math.hypot(p.x - x, p.y - y) }
+}
+
 /** Расстояние между точками в метрах (haversine). */
 export function distanceM(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const toRad = Math.PI / 180

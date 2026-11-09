@@ -1,29 +1,55 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { project, unproject } from '../core/geo'
-import { moveNode } from '../core/ops'
+import { Icon } from './icons'
+import { Minimap, scaleBar } from './overlays'
+import { drawRoad, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
 import { isDrivable, onewayDirection, roadStyle } from '../core/roads'
 import { store } from '../core/store'
+import type { Tags } from '../core/types'
 import type { Issue } from '../validate'
 import { drawTiles, type View } from './tiles'
+
+export type Tool = 'select' | 'draw' | 'node'
 
 interface Props {
   tileUrl: string
   issues: Issue[]
   showPedestrian: boolean
   focus: { lat: number; lon: number; n: number } | null
+  tool: Tool
+  /** теги новой дороги в режиме рисования */
+  drawTags: Tags
+  /** подсказки/сообщения в строку состояния */
+  onHint: (msg: string) => void
 }
 
 const HIT = 8
 
-export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
+/** Результат привязки курсора: к узлу, к отрезку дороги или никуда. */
+type Snap =
+  | { kind: 'node'; id: number; lat: number; lon: number }
+  | { kind: 'way'; wayId: number; lat: number; lon: number }
+
+export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags, onHint }: Props) {
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
   const canvas = useRef<HTMLCanvasElement>(null)
   const view = useRef<View>({ cx: 0, cy: 0, scale: 0.1 })
   const drag = useRef<null | { kind: 'pan' | 'node'; id?: number; sx: number; sy: number; moved: boolean }>(null)
   const dragPos = useRef<{ id: number; lat: number; lon: number } | null>(null)
+  const draft = useRef<DrawPoint[]>([])
+  const hover = useRef<{ x: number; y: number; snap: Snap | null } | null>(null)
   const raf = useRef(0)
-  const props = useRef({ tileUrl, issues, showPedestrian })
-  props.current = { tileUrl, issues, showPedestrian }
+  // оверлеи обновляются напрямую в DOM из draw(), без перерисовки React
+  const mini = useRef(new Minimap())
+  const miniCanvas = useRef<HTMLCanvasElement>(null)
+  const miniBox = useRef<HTMLDivElement>(null)
+  const barEl = useRef<HTMLDivElement>(null)
+  const barLabel = useRef<HTMLSpanElement>(null)
+  const coordsEl = useRef<HTMLDivElement>(null)
+  const fitScale = useRef(0)
+  const miniDrag = useRef(false)
+  const props = useRef({ tileUrl, issues, showPedestrian, tool, drawTags, onHint })
+  props.current = { tileUrl, issues, showPedestrian, tool, drawTags, onHint }
 
   const redraw = () => {
     cancelAnimationFrame(raf.current)
@@ -62,6 +88,38 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
       cy: (a.y + z.y) / 2,
       scale: Math.min(r.width / (z.x - a.x), r.height / (z.y - a.y)) * 0.92,
     }
+    fitScale.current = view.current.scale
+  }
+
+  /** Масштаб кнопками ± вокруг центра карты. */
+  function zoomBy(k: number) {
+    const v = view.current
+    v.scale = Math.max(0.005, Math.min(40, v.scale * k))
+    redraw()
+  }
+
+  /** Масштабная линейка, миникарта (видна только при приближении) — обновляются из draw(). */
+  function updateOverlays(w: number, h: number, dpr: number) {
+    const v = view.current
+    const sb = scaleBar(v)
+    if (barEl.current && barLabel.current) {
+      barEl.current.style.width = `${Math.round(sb.px)}px`
+      barLabel.current.textContent = sb.label
+    }
+    const m = mini.current
+    m.update(store.doc, store.version, dpr)
+    // показываем миникарту, когда окно покрывает заметно меньше половины сети
+    const zoomedIn = fitScale.current > 0 && v.scale > fitScale.current * 1.5
+    if (miniBox.current) miniBox.current.style.display = zoomedIn && m.ready ? 'block' : 'none'
+    if (zoomedIn && m.ready && miniCanvas.current) m.draw(miniCanvas.current, v, w, h, dpr)
+  }
+
+  const miniMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    const p = mini.current.toWorld(e.clientX - r.left, e.clientY - r.top)
+    view.current.cx = p.x
+    view.current.cy = p.y
+    redraw()
   }
 
   function draw() {
@@ -175,6 +233,40 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
       }
     }
 
+    // рисуемая дорога: уже поставленные точки и «резинка» до курсора
+    const tool = props.current.tool
+    if (tool === 'draw') {
+      const pts = draft.current.map(pointLatLon).filter((p): p is { lat: number; lon: number } => !!p)
+        .map((p) => toScreen(p.lat, p.lon, w, h))
+      const hv = hover.current
+      if (pts.length) {
+        const tail = hv?.snap ? toScreen(hv.snap.lat, hv.snap.lon, w, h) : hv ? { x: hv.x, y: hv.y } : null
+        ctx.strokeStyle = '#e91e63'; ctx.lineWidth = 3
+        ctx.beginPath()
+        pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)))
+        ctx.stroke()
+        if (tail) {
+          ctx.setLineDash([6, 4]); ctx.beginPath()
+          ctx.moveTo(pts.at(-1)!.x, pts.at(-1)!.y); ctx.lineTo(tail.x, tail.y)
+          ctx.stroke(); ctx.setLineDash([])
+        }
+        ctx.fillStyle = '#e91e63'
+        for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 7); ctx.fill() }
+      }
+    }
+    // маркер привязки: зелёный — узел, синий — точка на дороге
+    if (tool !== 'select' && hover.current) {
+      const hv = hover.current
+      if (hv.snap) {
+        const p = toScreen(hv.snap.lat, hv.snap.lon, w, h)
+        ctx.strokeStyle = hv.snap.kind === 'node' ? '#2e7d32' : '#1565c0'; ctx.lineWidth = 2.5
+        ctx.beginPath(); ctx.arc(p.x, p.y, 9, 0, 7); ctx.stroke()
+      } else if (tool === 'draw') {
+        ctx.fillStyle = 'rgba(233,30,99,0.5)'
+        ctx.beginPath(); ctx.arc(hv.x, hv.y, 3.5, 0, 7); ctx.fill()
+      }
+    }
+
     // выделение
     if (sel?.kind === 'way') {
       const way = doc.ways.get(sel.id)
@@ -187,6 +279,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
       const p = pos(sel.id)
       if (p) { ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, 7); ctx.stroke() }
     }
+
+    updateOverlays(w, h, dpr)
   }
 
   // ----- поиск объекта под курсором -----
@@ -204,8 +298,9 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
         if (!n) { prev = null; continue }
         const p = toScreen(n.lat, n.lon, w, h)
         const dn = Math.hypot(p.x - sx, p.y - sy)
-        // узлы выбираем только когда они нарисованы (при приближении), светофоры — всегда
-        const nodeVisible = view.current.scale > 0.5 || n.tags.highway === 'traffic_signals'
+        // узлы выбираем только когда они нарисованы (при приближении); светофоры и уже выбранный узел — всегда
+        const nodeVisible = view.current.scale > 0.5 || n.tags.highway === 'traffic_signals' ||
+          (store.selection?.kind === 'node' && store.selection.id === nid)
         if (nodeVisible && dn < HIT && (!bestN || dn < bestN.d)) bestN = { id: nid, d: dn }
         if (prev) {
           const dx = p.x - prev.x, dy = p.y - prev.y
@@ -222,6 +317,88 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
     return null
   }
 
+  // ----- привязка (snap) для рисования и склейки -----
+  /** Ближайший узел или отрезок дороги в радиусе HIT пикселей. exclude — узел, который не учитываем. */
+  function snap(sx: number, sy: number, w: number, h: number, exclude?: number): Snap | null {
+    const doc = store.doc
+    const ped = props.current.showPedestrian
+    let bestN: { id: number; d: number } | null = null
+    let bestS: { wayId: number; d: number; x: number; y: number } | null = null
+    for (const way of doc.ways.values()) {
+      if (!way.tags.highway) continue
+      if (!isDrivable(way) && !ped) continue
+      let prev: { x: number; y: number } | null = null
+      for (const nid of way.nodes) {
+        const n = doc.nodes.get(nid)
+        if (!n) { prev = null; continue }
+        const p = toScreen(n.lat, n.lon, w, h)
+        const dn = Math.hypot(p.x - sx, p.y - sy)
+        if (nid !== exclude && dn < HIT && (!bestN || dn < bestN.d)) bestN = { id: nid, d: dn }
+        if (prev) {
+          const dx = p.x - prev.x, dy = p.y - prev.y
+          const l2 = dx * dx + dy * dy || 1
+          const t = Math.max(0, Math.min(1, ((sx - prev.x) * dx + (sy - prev.y) * dy) / l2))
+          const x = prev.x + t * dx, y = prev.y + t * dy
+          const d = Math.hypot(x - sx, y - sy)
+          if (d < HIT && (!bestS || d < bestS.d)) bestS = { wayId: way.id, d, x, y }
+        }
+        prev = p
+      }
+    }
+    if (bestN) {
+      const n = doc.nodes.get(bestN.id)!
+      return { kind: 'node', id: bestN.id, lat: n.lat, lon: n.lon }
+    }
+    if (bestS) {
+      const ll = fromScreen(bestS.x, bestS.y, w, h)
+      return { kind: 'way', wayId: bestS.wayId, lat: ll.lat, lon: ll.lon }
+    }
+    return null
+  }
+
+  const pointLatLon = (p: DrawPoint) => {
+    if (p.kind === 'node') { const n = store.doc.nodes.get(p.id); return n ? { lat: n.lat, lon: n.lon } : null }
+    return { lat: p.lat, lon: p.lon }
+  }
+
+  function cancelDraft(msg?: string) {
+    draft.current = []
+    if (msg) props.current.onHint(msg)
+    redraw()
+  }
+
+  function finishDraft() {
+    const pts = draft.current
+    draft.current = []
+    if (pts.length < 2) { props.current.onHint('Нужно минимум две точки — дорога не создана'); redraw(); return }
+    const id = drawRoad(store, pts, props.current.drawTags)
+    if (id) {
+      store.select({ kind: 'way', id })
+      props.current.onHint(`Дорога создана (${pts.length} точек). Ctrl+Z — отменить`)
+    }
+  }
+
+  function addDraftPoint(sx: number, sy: number, w: number, h: number) {
+    const s = snap(sx, sy, w, h)
+    const ll = fromScreen(sx, sy, w, h)
+    const pt: DrawPoint = s
+      ? s.kind === 'node' ? { kind: 'node', id: s.id } : { kind: 'way', wayId: s.wayId, lat: s.lat, lon: s.lon }
+      : { kind: 'new', lat: ll.lat, lon: ll.lon }
+    const last = draft.current.at(-1)
+    if (last) {
+      const a = pointLatLon(last), b = pointLatLon(pt)
+      const same = (last.kind === 'node' && pt.kind === 'node' && last.id === pt.id) ||
+        (a && b && (() => {
+          const pa = toScreen(a.lat, a.lon, w, h), pb = toScreen(b.lat, b.lon, w, h)
+          return Math.hypot(pa.x - pb.x, pa.y - pb.y) < 6
+        })())
+      if (same) { finishDraft(); return } // повторный клик в последней точке = закончить
+    }
+    draft.current = [...draft.current, pt]
+    props.current.onHint(`Точек: ${draft.current.length}. Клик по последней точке или Enter — закончить, Backspace — убрать точку, Esc — отмена`)
+    redraw()
+  }
+
   // ----- события -----
   useEffect(() => {
     const c = canvas.current!
@@ -230,8 +407,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
     const onDown = (e: PointerEvent) => {
       const r = rect()
       const sx = e.clientX - r.left, sy = e.clientY - r.top
-      const hit = pick(sx, sy, r.width, r.height)
-      c.setPointerCapture(e.pointerId)
+      const hit = props.current.tool === 'select' ? pick(sx, sy, r.width, r.height) : null
+      try { c.setPointerCapture(e.pointerId) } catch { /* синтетические события без активного указателя */ }
       if (hit?.kind === 'node' && store.selection?.kind === 'node' && store.selection.id === hit.id) {
         drag.current = { kind: 'node', id: hit.id, sx, sy, moved: false }
       } else {
@@ -240,7 +417,21 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
     }
     const onMove = (e: PointerEvent) => {
       const d = drag.current
-      if (!d) return
+      if (coordsEl.current) {
+        const r = rect()
+        const ll = fromScreen(e.clientX - r.left, e.clientY - r.top, r.width, r.height)
+        coordsEl.current.textContent = `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`
+      }
+      if (!d) {
+        // наведение без нажатия: показываем, к чему привяжется точка
+        if (props.current.tool !== 'select') {
+          const r = rect()
+          const sx = e.clientX - r.left, sy = e.clientY - r.top
+          hover.current = { x: sx, y: sy, snap: snap(sx, sy, r.width, r.height) }
+          redraw()
+        }
+        return
+      }
       const r = rect()
       const sx = e.clientX - r.left, sy = e.clientY - r.top
       if (Math.hypot(sx - d.sx, sy - d.sy) > 3) d.moved = true
@@ -265,10 +456,31 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
       if (d.kind === 'node' && d.moved && dragPos.current) {
         const p = dragPos.current
         dragPos.current = null
-        moveNode(store, p.id, p.lat, p.lon)
+        // отпустили над другим узлом — склеиваем (так соединяют разорванные перекрёстки)
+        const target = snap(sx, sy, r.width, r.height, p.id)
+        if (target?.kind === 'node') {
+          mergeNodes(store, target.id, p.id)
+          store.select({ kind: 'node', id: target.id })
+          props.current.onHint('Узлы склеены. Ctrl+Z — отменить')
+        } else {
+          moveNode(store, p.id, p.lat, p.lon)
+        }
       } else if (!d.moved) {
-        const hit = pick(sx, sy, r.width, r.height)
-        store.select(hit)
+        const tool = props.current.tool
+        if (tool === 'select') {
+          store.select(pick(sx, sy, r.width, r.height))
+        } else if (tool === 'draw') {
+          addDraftPoint(sx, sy, r.width, r.height)
+        } else if (tool === 'node') {
+          const s = snap(sx, sy, r.width, r.height)
+          if (s?.kind === 'way') {
+            const id = insertNodeOnWay(store, s.wayId, s.lat, s.lon)
+            store.select({ kind: 'node', id })
+            props.current.onHint('Узел добавлен на дорогу')
+          } else {
+            props.current.onHint('Наведите курсор на дорогу, чтобы поставить на неё узел')
+          }
+        }
       }
     }
     const onWheel = (e: WheelEvent) => {
@@ -319,5 +531,60 @@ export function MapView({ tileUrl, issues, showPedestrian, focus }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus])
 
-  return <canvas ref={canvas} className="map" />
+  // смена инструмента: сбрасываем незаконченную дорогу; в режиме рисования работают Enter / Esc / Backspace
+  useEffect(() => {
+    draft.current = []
+    hover.current = null
+    redraw()
+    if (tool !== 'draw') return
+    props.current.onHint('Рисование дороги: кликайте по карте. Клик по узлу присоединяет, клик по дороге делает перекрёсток')
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return
+      if (e.key === 'Enter') { e.preventDefault(); finishDraft() }
+      else if (e.key === 'Escape') cancelDraft('Рисование отменено')
+      else if (e.key === 'Backspace' && draft.current.length) {
+        e.preventDefault()
+        draft.current = draft.current.slice(0, -1)
+        redraw()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool])
+
+  return (
+    <div className="map-wrap">
+      <canvas ref={canvas} className={tool === 'select' ? 'map' : 'map tool'} />
+
+      <div className="zoom-ctl">
+        <button onClick={() => zoomBy(1.5)} title="Приблизить"><Icon name="plus" /></button>
+        <button onClick={() => zoomBy(1 / 1.5)} title="Отдалить"><Icon name="minus" /></button>
+        <button onClick={() => { fit(); redraw() }} title="Показать всю сеть"><Icon name="fit" /></button>
+      </div>
+
+      <div className="map-hud">
+        <div ref={miniBox} className="minimap" style={{ display: 'none' }}>
+          <canvas
+            ref={miniCanvas}
+            title="Миникарта: клик или перетаскивание — переместить вид"
+            onPointerDown={(e) => {
+              miniDrag.current = true
+              try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* без активного указателя */ }
+              miniMove(e)
+            }}
+            onPointerMove={(e) => { if (miniDrag.current) miniMove(e) }}
+            onPointerUp={() => { miniDrag.current = false }}
+          />
+        </div>
+        <div className="scalebar">
+          <div ref={barEl} className="bar" />
+          <span ref={barLabel} />
+        </div>
+      </div>
+
+      <div ref={coordsEl} className="coords" />
+    </div>
+  )
 }

@@ -1,16 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { deleteWay, reverseWay, setTags } from '../core/ops'
+import { deleteNode, deleteWay, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
+import { ROAD_TEMPLATES } from '../core/templates'
 import type { Tags } from '../core/types'
-
-/** Шаблоны дорог: один клик ставит типовой набор тегов. Добавляйте свои. */
-const TEMPLATES: { name: string; tags: Tags }[] = [
-  { name: 'Магистраль 3 полосы', tags: { highway: 'primary', lanes: '3', maxspeed: '60' } },
-  { name: 'Улица 2 полосы', tags: { highway: 'secondary', lanes: '2', maxspeed: '60' } },
-  { name: 'Жилая улица', tags: { highway: 'residential', lanes: '2', maxspeed: '40' } },
-  { name: 'Одностороння 2 полосы', tags: { highway: 'secondary', lanes: '2', oneway: 'yes', maxspeed: '60' } },
-  { name: 'Мост', tags: { bridge: 'yes', layer: '1' } },
-]
 
 const HIGHWAYS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'service',
   'primary_link', 'secondary_link', 'living_street', 'footway']
@@ -65,7 +57,7 @@ export function AttributePanel() {
           </div>
           <div className="sub">Шаблоны</div>
           <div className="row wrap">
-            {TEMPLATES.map((t) => <button key={t.name} onClick={() => patch(t.tags)}>{t.name}</button>)}
+            {ROAD_TEMPLATES.map((t) => <button key={t.name} onClick={() => patch(t.tags)}>{t.name}</button>)}
           </div>
         </>
       )}
@@ -75,6 +67,8 @@ export function AttributePanel() {
           <button onClick={() => patch({ highway: 'traffic_signals' })}>Светофор</button>
           <button onClick={() => patch({ highway: 'crossing' })}>Переход</button>
           <button onClick={() => { const t = { ...el.tags }; delete t.highway; apply(t) }}>Убрать highway</button>
+          <button onClick={() => splitAtNode(store, sel.id)} title="S">Разрезать в узле (S)</button>
+          <button className="danger" onClick={() => { deleteNode(store, sel.id); store.select(null) }} title="Delete">Удалить узел</button>
         </div>
       )}
 
