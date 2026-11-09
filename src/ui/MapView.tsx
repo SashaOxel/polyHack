@@ -2,10 +2,10 @@ import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { offsetPolyline, project, unproject } from '../core/geo'
 import { Icon } from './icons'
 import { Minimap, scaleBar } from './overlays'
-import { drawCrossingIcon, drawSignalIcon } from './markerIcons'
+import { drawCrossingIcon, drawSignalIcon } from './roadIcons'
 import { drawSpeedSign } from './speedSign'
-import { addMarker, drawRoad, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
-import { isDrivable, laneInfo, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
+import { drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
+import { hasCrossing, hasSignal, isDrivable, laneInfo, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
 import { store } from '../core/store'
 import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
@@ -246,7 +246,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       if (!n) continue
       const p = pos(id)!
       if (p.x < -10 || p.y < -10 || p.x > w + 10 || p.y > h + 10) continue
-      if (n.tags.highway === 'traffic_signals' || n.tags.highway === 'crossing') {
+      if (hasSignal(n.tags) || hasCrossing(n.tags)) {
         // рисуется иконкой в проходе ниже
       } else if (showNodes) {
         ctx.fillStyle = '#fff'; ctx.strokeStyle = '#444'; ctx.lineWidth = 1
@@ -254,7 +254,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       }
     }
 
-    // светофоры и переходы: из OSM (узлы highway=traffic_signals / crossing) и маркеры «только UI»
+    // светофоры и переходы рисуются по тегам узлов (highway=traffic_signals / crossing)
     const iconSize = Math.max(16, Math.min(28, 10 * zoomK + 8))
     const crossLen = (hw: string | undefined) => roadStyle(hw).width * zoomK * 2.4
     const drawnIcons = new Set<number>()
@@ -262,22 +262,18 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       if (!isDrivable(way) && !props.current.showPedestrian) continue
       way.nodes.forEach((nid, i) => {
         const n = doc.nodes.get(nid)
-        const hw = n?.tags.highway
-        if (!n || (hw !== 'traffic_signals' && hw !== 'crossing') || drawnIcons.has(nid)) return
-        if (hw === 'crossing' && view.current.scale < 0.25) return // на мелком масштабе зебры только мусорят
+        const sig = !!n && hasSignal(n.tags), cro = !!n && hasCrossing(n.tags)
+        if (!n || (!sig && !cro) || drawnIcons.has(nid)) return
+        if (!sig && view.current.scale < 0.25) return // на мелком масштабе зебры только мусорят
         const p = pos(nid)!
         if (p.x < -20 || p.y < -20 || p.x > w + 20 || p.y > h + 20) return
         drawnIcons.add(nid)
-        if (hw === 'traffic_signals') { drawSignalIcon(ctx, p.x, p.y, iconSize, false); return }
-        const a = pos(way.nodes[Math.max(0, i - 1)]), b = pos(way.nodes[Math.min(way.nodes.length - 1, i + 1)])
-        drawCrossingIcon(ctx, p.x, p.y, a && b ? Math.atan2(b.y - a.y, b.x - a.x) : 0, crossLen(way.tags.highway), false)
+        if (cro && view.current.scale >= 0.25) {
+          const a = pos(way.nodes[Math.max(0, i - 1)]), b = pos(way.nodes[Math.min(way.nodes.length - 1, i + 1)])
+          drawCrossingIcon(ctx, p.x, p.y, a && b ? Math.atan2(b.y - a.y, b.x - a.x) : 0, crossLen(way.tags.highway))
+        }
+        if (sig) drawSignalIcon(ctx, p.x, p.y, iconSize)
       })
-    }
-    for (const m of store.markers.values()) {
-      const p = toScreen(m.lat, m.lon, w, h)
-      if (p.x < -20 || p.y < -20 || p.x > w + 20 || p.y > h + 20) continue
-      if (m.kind === 'signal') drawSignalIcon(ctx, p.x, p.y, iconSize, true)
-      else drawCrossingIcon(ctx, p.x, p.y, -m.angle, crossLen(m.wayId ? doc.ways.get(m.wayId)?.tags.highway : undefined), true)
     }
 
     // проблемы
@@ -340,13 +336,6 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
         way.nodes.forEach((nid, i) => { const p = pos(nid); if (p) (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)) })
         ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = Math.max(8 * zoomK * 0.7, roadPx(way) + 6); ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1
       }
-    } else if (sel?.kind === 'marker') {
-      const m = store.markers.get(sel.id)
-      if (m) {
-        const p = toScreen(m.lat, m.lon, w, h)
-        ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 3
-        ctx.beginPath(); ctx.arc(p.x, p.y, iconSize * 0.85, 0, 7); ctx.stroke()
-      }
     } else if (sel?.kind === 'node') {
       const p = pos(sel.id)
       if (p) { ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, 7); ctx.stroke() }
@@ -378,10 +367,6 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
   function pick(sx: number, sy: number, w: number, h: number) {
     const doc = store.doc
     const ped = props.current.showPedestrian
-    for (const m of store.markers.values()) {
-      const p = toScreen(m.lat, m.lon, w, h)
-      if (Math.hypot(p.x - sx, p.y - sy) < 13) return { kind: 'marker' as const, id: m.id }
-    }
     let bestN: { id: number; d: number } | null = null
     let bestW: { id: number; d: number; x: number; y: number } | null = null
     for (const way of doc.ways.values()) {
@@ -411,29 +396,6 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     if (bestN) return { kind: 'node' as const, id: bestN.id }
     if (bestW) return { kind: 'way' as const, id: bestW.id, at: fromScreen(bestW.x, bestW.y, w, h) }
     return null
-  }
-
-  /** Ближайшая точка на проезжей дороге и направление дороги там (для светофора/перехода). */
-  function nearestRoadPoint(sx: number, sy: number, w: number, h: number) {
-    const doc = store.doc
-    let best: { wayId: number; d: number; x: number; y: number; a: { lat: number; lon: number }; b: { lat: number; lon: number } } | null = null
-    for (const way of doc.ways.values()) {
-      if (!isDrivable(way)) continue
-      for (let i = 0; i < way.nodes.length - 1; i++) {
-        const na = doc.nodes.get(way.nodes[i]), nb = doc.nodes.get(way.nodes[i + 1])
-        if (!na || !nb) continue
-        const a = toScreen(na.lat, na.lon, w, h), b = toScreen(nb.lat, nb.lon, w, h)
-        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy || 1
-        const t = Math.max(0, Math.min(1, ((sx - a.x) * dx + (sy - a.y) * dy) / l2))
-        const x = a.x + t * dx, y = a.y + t * dy
-        const d = Math.hypot(x - sx, y - sy)
-        if (d < HIT * 1.5 && (!best || d < best.d)) best = { wayId: way.id, d, x, y, a: na, b: nb }
-      }
-    }
-    if (!best) return null
-    const ll = fromScreen(best.x, best.y, w, h)
-    const pa = project(best.a.lat, best.a.lon), pb = project(best.b.lat, best.b.lon)
-    return { wayId: best.wayId, lat: ll.lat, lon: ll.lon, angle: Math.atan2(pb.y - pa.y, pb.x - pa.x) }
   }
 
   // ----- привязка (snap) для рисования и склейки -----
@@ -594,13 +556,16 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
         } else if (tool === 'draw') {
           addDraftPoint(sx, sy, r.width, r.height)
         } else if (tool === 'signal' || tool === 'crossing') {
-          const rp = nearestRoadPoint(sx, sy, r.width, r.height)
-          if (rp) {
-            const id = addMarker(store, tool, rp.lat, rp.lon, rp.angle, rp.wayId)
-            store.select({ kind: 'marker', id })
-            props.current.onHint(`${tool === 'signal' ? 'Светофор' : 'Переход'} добавлен — только на UI, в .osm не попадёт. Ctrl+Z — отменить`)
+          // клик по узлу — тег на этом узле, клик по отрезку дороги — новый узел с тегом; это обычная правка OSM
+          const s = snap(sx, sy, r.width, r.height)
+          const target = s?.kind === 'node' ? ({ kind: 'node', id: s.id } as const)
+            : s?.kind === 'way' ? ({ kind: 'way', wayId: s.wayId, lat: s.lat, lon: s.lon } as const) : null
+          if (target) {
+            const id = placeRoadFeature(store, target, tool)
+            store.select({ kind: 'node', id })
+            props.current.onHint(`${tool === 'signal' ? 'Светофор' : 'Переход'} добавлен (узел ${id}) — попадёт в .osm. Ctrl+Z — отменить`)
           } else {
-            props.current.onHint('Кликните по дороге для автомобилей')
+            props.current.onHint('Кликните по дороге или по её узлу')
           }
         } else if (tool === 'node') {
           const s = snap(sx, sy, r.width, r.height)

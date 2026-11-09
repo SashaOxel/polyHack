@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { drawRoad, moveNode, reverseWay, setElevationRamp } from './ops'
+import { buildGraph } from './graph'
+import { drawRoad, moveNode, placeRoadFeature, reverseWay, setElevationRamp } from './ops'
 import { parseOsm } from './parse'
 import { isDrivable } from './roads'
 import { serializeOsm } from './serialize'
@@ -33,6 +34,28 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
     const net = readFileSync(join(dir, 'out.net.xml'), 'utf8')
     expect(net).toContain('<edge ')
   }, 60000)
+
+  it('поставленный светофор становится светофорным перекрёстком в сети SUMO', () => {
+    const load = () => {
+      const s = new Store()
+      s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+      return s
+    }
+    const tls = (s: Store) => {
+      const dir = mkdtempSync(join(tmpdir(), 'uds-tls-'))
+      const osm = join(dir, 't.osm')
+      writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+      execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
+      return (readFileSync(join(dir, 'out.net.xml'), 'utf8').match(/type="traffic_light"/g) ?? []).length
+    }
+    const s = load()
+    const baseline = tls(s)
+    // перекрёсток без светофора, где сходятся минимум три двусторонние дороги
+    const g = buildGraph(s.doc)
+    const junction = [...g.nodes.values()].find((n) => n.in.length >= 3 && n.out.length >= 3 && s.doc.nodes.get(n.id)!.tags.highway === undefined)!
+    placeRoadFeature(s, { kind: 'node', id: junction.id }, 'signal')
+    expect(tls(s)).toBeGreaterThan(baseline)
+  }, 120000)
 
   it('файл с высотами (тег ele) проходит через SUMO', () => {
     const s = new Store()

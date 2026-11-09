@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { deleteMarker, deleteNode, deleteWay, reverseWay, setTags, splitAtNode } from '../core/ops'
+import { deleteNode, deleteWay, featureTags, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
 import { speedLimit } from '../core/roads'
 import { ROAD_TEMPLATES } from '../core/templates'
@@ -32,22 +32,6 @@ export function AttributePanel() {
   useEffect(() => {
     setRows(el ? Object.entries(el.tags) : [])
   }, [el, store.version])
-
-  if (sel?.kind === 'marker') {
-    const m = store.markers.get(sel.id)
-    if (m) {
-      return (
-        <div className="panel-body">
-          <h3>{m.kind === 'signal' ? 'Светофор' : 'Пешеходный переход'} (только UI)</h3>
-          <div className="note strong">Нарисован в редакторе и в файл .osm не попадает. Нужен для наглядности.</div>
-          <div className="row">
-            <button className="danger" onClick={() => { deleteMarker(store, m.id); store.select(null) }} title="Delete">Удалить</button>
-          </div>
-          <div className="note">Чтобы светофор или переход попал в файл для симулятора, добавьте тег на узел дороги: highway=traffic_signals или highway=crossing.</div>
-        </div>
-      )
-    }
-  }
 
   if (!sel || !el) {
     return <div className="hint">Выберите узел или дорогу на карте.<br />Узел можно перетащить мышью.</div>
@@ -104,8 +88,8 @@ export function AttributePanel() {
 
       {kind === 'node' && (
         <div className="row wrap">
-          <button onClick={() => patch({ highway: 'traffic_signals' })}>Светофор</button>
-          <button onClick={() => patch({ highway: 'crossing' })}>Переход</button>
+          <button onClick={() => apply(featureTags(el.tags, 'signal'))}>Светофор</button>
+          <button onClick={() => apply(featureTags(el.tags, 'crossing'))}>Переход</button>
           <button onClick={() => { const t = { ...el.tags }; delete t.highway; apply(t) }}>Убрать highway</button>
           <button onClick={() => splitAtNode(store, sel.id)} title="S">Разрезать в узле (S)</button>
           <button className="danger" onClick={() => { deleteNode(store, sel.id); store.select(null) }} title="Delete">Удалить узел</button>

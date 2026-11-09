@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { deleteMarker, deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
+import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
@@ -116,7 +116,6 @@ export function App() {
       else if (e.key === 'Delete' || (e.key === 'Backspace' && tool !== 'draw')) {
         if (sel?.kind === 'way') { deleteWay(store, sel.id); store.select(null) }
         else if (sel?.kind === 'node') { deleteNode(store, sel.id); store.select(null) }
-        else if (sel?.kind === 'marker') { deleteMarker(store, sel.id); store.select(null) }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -158,8 +157,8 @@ export function App() {
     { id: 'select', icon: 'select', label: 'Выбрать', key: 'V' },
     { id: 'draw', icon: 'road', label: 'Дорога', key: 'D' },
     { id: 'node', icon: 'node', label: 'Узел на дороге', key: 'N' },
-    { id: 'signal', icon: 'signal', label: 'Светофор (только UI)', key: 'T' },
-    { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход (только UI)', key: 'C' },
+    { id: 'signal', icon: 'signal', label: 'Светофор', key: 'T' },
+    { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход', key: 'C' },
   ]
 
   return (
@@ -212,7 +211,6 @@ export function App() {
             <label><input type="checkbox" checked={onlyRoads} onChange={(e) => setOnlyRoads(e.target.checked)} /> Только дороги (без зданий и маршрутов)</label>
             <label><input type="checkbox" checked={withPed} disabled={!onlyRoads} onChange={(e) => setWithPed(e.target.checked)} /> Добавить пешеходные</label>
             <label><input type="checkbox" checked={keepMeta} onChange={(e) => setKeepMeta(e.target.checked)} /> Сохранить метаданные OSM</label>
-            <div className="field"><span>Светофоры и переходы, добавленные инструментами T и C, существуют только в редакторе и в файл не попадают.</span></div>
           </div>
         </details>
       </header>
@@ -252,7 +250,7 @@ export function App() {
           {mode === '2d' && (tool === 'signal' || tool === 'crossing') && (
             <div className="tool-card">
               <b>{tool === 'signal' ? 'Светофор' : 'Пешеходный переход'}</b>
-              <span>Кликните по дороге. <em className="uionly">Только на UI</em> — в .osm не сохраняется</span>
+              <span>Клик по дороге: на ней появится узел с тегом {tool === 'signal' ? 'highway=traffic_signals' : 'highway=crossing'} — это попадёт в .osm</span>
             </div>
           )}
           {mode === '2d' && tool === 'node' && (

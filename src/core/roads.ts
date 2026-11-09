@@ -1,5 +1,5 @@
 import { distanceM } from './geo'
-import type { OsmDocument, OsmNode, OsmWay } from './types'
+import type { OsmDocument, OsmNode, OsmWay, Tags } from './types'
 
 /** Классы дорог для автомобилей (то, что нужно SUMO / MATSim / Webots). */
 export const DRIVABLE = new Set([
@@ -147,3 +147,11 @@ export function laneInfo(way: OsmWay): LaneInfo | null {
   }
   return { total, twoWay: !oneway, centerAfter, explicit }
 }
+
+// ---------- светофоры и пешеходные переходы (теги узла) ----------
+
+/** Узел со светофором: highway=traffic_signals. */
+export const hasSignal = (t: Tags) => t.highway === 'traffic_signals'
+
+/** Узел с пешеходным переходом: highway=crossing или тег crossing=* (в том числе у светофора: crossing=traffic_signals). */
+export const hasCrossing = (t: Tags) => t.highway === 'crossing' || (t.crossing !== undefined && t.crossing !== 'no')

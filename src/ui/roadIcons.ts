@@ -1,23 +1,7 @@
-/**
- * Иконки светофора и пешеходного перехода для 2D-карты.
- * uiOnly = маркер нарисован в редакторе и в .osm не попадёт: показываем его с синим пунктиром.
- */
-
-const BLUE = '#2563eb'
-
-function dashedRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
-  ctx.save()
-  ctx.setLineDash([3, 3])
-  ctx.strokeStyle = BLUE
-  ctx.lineWidth = 1.5
-  ctx.beginPath()
-  ctx.arc(x, y, r, 0, Math.PI * 2)
-  ctx.stroke()
-  ctx.restore()
-}
+/** Иконки светофора и пешеходного перехода для 2D-карты (рисуются по тегам узла). */
 
 /** Светофор: тёмный корпус с тремя сигналами. size — высота корпуса, px. */
-export function drawSignalIcon(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, uiOnly: boolean) {
+export function drawSignalIcon(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
   const h = size, w = size * 0.5
   ctx.save()
   ctx.shadowColor = 'rgba(0,0,0,0.35)'
@@ -38,7 +22,6 @@ export function drawSignalIcon(ctx: CanvasRenderingContext2D, x: number, y: numb
     ctx.fill()
   })
   ctx.restore()
-  if (uiOnly) dashedRing(ctx, x, y, h * 0.78)
 }
 
 /**
@@ -46,7 +29,7 @@ export function drawSignalIcon(ctx: CanvasRenderingContext2D, x: number, y: numb
  * length — ширина дороги в пикселях (длина полос зебры).
  */
 export function drawCrossingIcon(
-  ctx: CanvasRenderingContext2D, x: number, y: number, screenAngle: number, length: number, uiOnly: boolean,
+  ctx: CanvasRenderingContext2D, x: number, y: number, screenAngle: number, length: number,
 ) {
   const len = Math.max(12, length)
   ctx.save()
@@ -56,11 +39,5 @@ export function drawCrossingIcon(
   ctx.fillRect(-14, -len / 2 - 1, 28, len + 2)
   ctx.fillStyle = '#ffffff'
   for (let k = -2; k <= 2; k++) ctx.fillRect(k * 5 - 1.7, -len / 2, 3.4, len)
-  if (uiOnly) {
-    ctx.setLineDash([3, 3])
-    ctx.strokeStyle = BLUE
-    ctx.lineWidth = 1.5
-    ctx.strokeRect(-15.5, -len / 2 - 2.5, 31, len + 5)
-  }
   ctx.restore()
 }

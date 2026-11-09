@@ -1,7 +1,7 @@
 import { cumulativeDistance } from './elevation'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
-import type { Marker, OsmDocument, OsmRelation, OsmWay, Tags } from './types'
+import type { OsmDocument, OsmRelation, OsmWay, Tags } from './types'
 
 /**
  * Операции редактирования поверх store.commit. Каждая операция = один шаг undo.
@@ -303,19 +303,40 @@ export function mergeNodes(store: Store, keepId: number, removeId: number) {
   })
 }
 
-// ---------- маркеры «только UI» (светофоры и переходы, не попадают в .osm) ----------
+// ---------- светофоры и пешеходные переходы (реальная правка OSM) ----------
 
-/** Поставить светофор или переход. angle — направление дороги в этой точке (север вверх, восток = 0). */
-export function addMarker(store: Store, kind: Marker['kind'], lat: number, lon: number, angle: number, wayId?: number): number {
-  let id = 0
-  store.commit(kind === 'signal' ? 'Добавить светофор (UI)' : 'Добавить переход (UI)', (tx) => {
-    id = tx.newId()
-    tx.setMarker({ id, kind, lat, lon, angle, wayId })
-  })
-  return id
+export type RoadFeature = 'signal' | 'crossing'
+
+/**
+ * Теги узла после добавления светофора или перехода. Правила OSM:
+ *  - светофор: highway=traffic_signals;
+ *  - переход: highway=crossing + crossing=uncontrolled (зебра без светофора);
+ *  - переход со светофором: crossing=traffic_signals (узел остаётся светофором или переходом).
+ */
+export function featureTags(tags: Tags, feature: RoadFeature): Tags {
+  const t = { ...tags }
+  if (feature === 'signal') {
+    if (t.highway === 'crossing') t.crossing = t.crossing ?? 'traffic_signals'
+    t.highway = 'traffic_signals'
+  } else if (t.highway === 'traffic_signals') {
+    t.crossing = t.crossing ?? 'traffic_signals'
+  } else {
+    t.highway = 'crossing'
+    t.crossing = t.crossing ?? 'uncontrolled'
+  }
+  return t
 }
 
-export function deleteMarker(store: Store, id: number) {
-  if (!store.markers.has(id)) return
-  store.commit('Удалить маркер (UI)', (tx) => tx.deleteMarker(id))
+/** Куда ставить: на существующий узел дороги или в точку на отрезке дороги (там появится новый узел). */
+export type FeatureTarget = { kind: 'node'; id: number } | { kind: 'way'; wayId: number; lat: number; lon: number }
+
+/** Поставить светофор или переход одним шагом undo. Возвращает id узла, на котором он стоит. */
+export function placeRoadFeature(store: Store, target: FeatureTarget, feature: RoadFeature): number {
+  let nodeId = 0
+  store.commit(feature === 'signal' ? 'Добавить светофор' : 'Добавить пешеходный переход', (tx) => {
+    nodeId = target.kind === 'node' ? target.id : insertIntoWay(tx, store.doc, target.wayId, target.lat, target.lon)
+    const n = store.doc.nodes.get(nodeId)
+    if (n) tx.setNode({ ...n, tags: featureTags(n.tags, feature) })
+  })
+  return nodeId
 }

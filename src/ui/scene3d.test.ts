@@ -1,10 +1,13 @@
 import { readFileSync } from 'node:fs'
 import * as THREE from 'three'
 import { describe, expect, it } from 'vitest'
+import { placeRoadFeature } from '../core/ops'
 import { parseOsm } from '../core/parse'
+import { Store } from '../core/store'
 import { buildScene, roadWidth } from './scene3d'
 
-const doc = parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8'))
+const xml = readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')
+const doc = parseOsm(xml)
 
 describe('3D-сцена', () => {
   const opts = { zScale: 3, buildings: true, pedestrian: false }
@@ -63,20 +66,17 @@ describe('3D-сцена', () => {
     expect(s.wayAnchor(-1)).toBeNull()
   })
 
-  it('маркеры «только UI» и переходы из OSM попадают в сцену', () => {
+  it('светофор и переход, поставленные инструментами, появляются в сцене', () => {
     const base = buildScene(doc, opts)
     expect(base.stats.crossings).toBeGreaterThan(0) // highway=crossing на проезжих дорогах файла
-    const way = [...doc.ways.values()].find((w) => w.tags.highway === 'residential' && w.nodes.length > 2)!
-    const n = doc.nodes.get(way.nodes[1])!
-    const withMarkers = buildScene(doc, {
-      ...opts,
-      markers: [
-        { id: -1, kind: 'signal', lat: n.lat, lon: n.lon, angle: 0, wayId: way.id },
-        { id: -2, kind: 'crossing', lat: n.lat, lon: n.lon, angle: 1, wayId: way.id },
-      ],
-    })
-    expect(withMarkers.stats.signals).toBe(base.stats.signals + 1)
-    expect(withMarkers.stats.crossings).toBe(base.stats.crossings + 1)
+    const store = new Store()
+    store.load(parseOsm(xml), 'x.osm')
+    const way = [...store.doc.ways.values()].find((w) => w.tags.highway === 'residential' && w.nodes.length > 3)!
+    placeRoadFeature(store, { kind: 'node', id: way.nodes[1] }, 'signal')
+    placeRoadFeature(store, { kind: 'node', id: way.nodes[2] }, 'crossing')
+    const after = buildScene(store.doc, opts)
+    expect(after.stats.signals).toBe(base.stats.signals + 1)
+    expect(after.stats.crossings).toBe(base.stats.crossings + 1)
   })
 
   it('разметка полос: пунктир попадает в сцену, ширина дороги растёт с числом полос', () => {

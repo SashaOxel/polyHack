@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildGraph } from './graph'
-import { deleteNode, deleteWay, drawRoad, insertNodeOnWay, mergeNodes, splitAtNode } from './ops'
+import { deleteNode, deleteWay, drawRoad, featureTags, insertNodeOnWay, mergeNodes, placeRoadFeature, splitAtNode } from './ops'
+import { serializeOsm } from './serialize'
 import { Store } from './store'
 import { emptyDocument, type Tags } from './types'
 
@@ -172,5 +173,40 @@ describe('mergeNodes', () => {
     expect(s.doc.ways.get(1)!.nodes).toEqual([1, 2])
     mergeNodes(s, 1, 2) // дорога 1: [1,2] → [1,1] → [1] → удаляется
     expect(s.doc.ways.has(1)).toBe(false)
+  })
+})
+
+describe('светофоры и пешеходные переходы — это правка OSM', () => {
+  it('клик по отрезку дороги: появляется новый узел с тегом, он в дороге и попадает в .osm', () => {
+    const s = plus()
+    const nodesBefore = s.doc.nodes.size
+    const id = placeRoadFeature(s, { kind: 'way', wayId: 1, lat: 52.0, lon: 104.0005 }, 'signal')
+    expect(id).toBeLessThan(0)
+    expect(s.doc.nodes.size).toBe(nodesBefore + 1)
+    expect(s.doc.nodes.get(id)!.tags.highway).toBe('traffic_signals')
+    expect(s.doc.ways.get(1)!.nodes).toContain(id)
+    expect(s.dirty).toBe(true) // файл изменён, его надо сохранить
+    const xml = serializeOsm(s.doc, { onlyRoads: true })
+    expect(xml).toContain(`<node id="${id}"`)
+    expect(xml).toContain('v="traffic_signals"')
+    s.undo() // одним шагом: и узел, и тег
+    expect(s.doc.nodes.has(id)).toBe(false)
+    expect(s.doc.ways.get(1)!.nodes).toEqual([1, 2, 3])
+  })
+
+  it('клик по существующему узлу ставит тег на него, новых узлов нет', () => {
+    const s = plus()
+    const n = s.doc.nodes.size
+    expect(placeRoadFeature(s, { kind: 'node', id: 2 }, 'crossing')).toBe(2)
+    expect(s.doc.nodes.size).toBe(n)
+    expect(s.doc.nodes.get(2)!.tags).toMatchObject({ highway: 'crossing', crossing: 'uncontrolled' })
+    expect(serializeOsm(s.doc, { onlyRoads: true })).toContain('k="crossing" v="uncontrolled"')
+  })
+
+  it('светофор и переход на одном узле не затирают друг друга', () => {
+    expect(featureTags({ highway: 'crossing', crossing: 'uncontrolled' }, 'signal')).toEqual({ highway: 'traffic_signals', crossing: 'uncontrolled' })
+    expect(featureTags({ highway: 'crossing' }, 'signal')).toEqual({ highway: 'traffic_signals', crossing: 'traffic_signals' })
+    expect(featureTags({ highway: 'traffic_signals' }, 'crossing')).toEqual({ highway: 'traffic_signals', crossing: 'traffic_signals' })
+    expect(featureTags({ name: 'x' }, 'signal')).toEqual({ name: 'x', highway: 'traffic_signals' })
   })
 })

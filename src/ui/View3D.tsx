@@ -117,7 +117,7 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     if (store.doc.nodes.size === 0) { g.data = null; setStats(null); g.render(); return }
 
     const t0 = performance.now()
-    const data = buildScene(store.doc, { zScale, buildings, pedestrian: showPedestrian, markers: [...store.markers.values()] })
+    const data = buildScene(store.doc, { zScale, buildings, pedestrian: showPedestrian })
     g.data = data
     g.scene.add(data.root)
     setStats(data.stats)

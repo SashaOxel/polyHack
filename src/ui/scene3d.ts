@@ -2,8 +2,8 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { elevationContext, wayProfile } from '../core/elevation'
 import { dashPolyline, offsetPolyline, project } from '../core/geo'
-import { isDrivable, laneInfo, roadStyle } from '../core/roads'
-import type { Marker, OsmDocument, OsmWay } from '../core/types'
+import { hasCrossing, hasSignal, isDrivable, laneInfo, roadStyle } from '../core/roads'
+import type { OsmDocument, OsmWay } from '../core/types'
 
 /**
  * Построитель 3D-сцены из документа. Чистая функция: three.js работает и в Node, поэтому её можно тестировать.
@@ -15,8 +15,6 @@ export interface BuildOptions {
   zScale: number
   buildings: boolean
   pedestrian: boolean
-  /** светофоры и переходы «только UI» из редактора */
-  markers?: Marker[]
 }
 
 export interface SceneData {
@@ -153,10 +151,10 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
       }
     }
 
-    // пешеходные переходы из OSM (узлы highway=crossing на проезжей дороге)
+    // пешеходные переходы (узлы highway=crossing или crossing=* на проезжей дороге)
     if (drivable) {
       pts.forEach((q, i) => {
-        if (q.id === undefined || crossingNodes.has(q.id) || doc.nodes.get(q.id)?.tags.highway !== 'crossing') return
+        if (q.id === undefined || crossingNodes.has(q.id) || !hasCrossing(doc.nodes.get(q.id)?.tags ?? {})) return
         crossingNodes.add(q.id)
         const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)]
         crossings.push({ x: q.x, y: q.y, z: q.z, dx: b.x - a.x, dz: b.z - a.z, width: roadWidth(way) })
@@ -200,35 +198,9 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     root.add(inst)
   }
 
-  // ---- маркеры «только UI»: высота берётся с дороги, на которую они поставлены ----
-  const groundY = (m: Marker, x: number, z: number) => {
-    const way = m.wayId !== undefined ? doc.ways.get(m.wayId) : undefined
-    if (!way) return 0
-    let best = Infinity, y = 0
-    for (const q of wayPoints(way)) {
-      const d = Math.hypot(q.x - x, q.z - z)
-      if (d < best) { best = d; y = q.y }
-    }
-    return y
-  }
-  const uiSignals: { x: number; y: number; z: number }[] = []
-  for (const m of opts.markers ?? []) {
-    const w = world(m.lat, m.lon)
-    const y = groundY(m, w.x, w.z)
-    if (m.kind === 'signal') uiSignals.push({ x: w.x, y, z: w.z })
-    else {
-      const way = m.wayId !== undefined ? doc.ways.get(m.wayId) : undefined
-      // angle — «север вверх», в мире X на восток, Z на юг
-      crossings.push({ x: w.x, y, z: w.z, dx: Math.cos(m.angle), dz: -Math.sin(m.angle), width: way ? roadWidth(way) : 6 })
-    }
-  }
-
-  // ---- светофоры (OSM + UI) ----
-  const spots = [
-    ...[...doc.nodes.values()].filter((n) => n.tags.highway === 'traffic_signals' && nodeY.has(n.id))
-      .map((n) => { const w = world(n.lat, n.lon); return { x: w.x, y: nodeY.get(n.id) ?? 0, z: w.z } }),
-    ...uiSignals,
-  ]
+  // ---- светофоры: узлы highway=traffic_signals ----
+  const spots = [...doc.nodes.values()].filter((n) => hasSignal(n.tags) && nodeY.has(n.id))
+    .map((n) => { const w = world(n.lat, n.lon); return { x: w.x, y: nodeY.get(n.id) ?? 0, z: w.z } })
   if (spots.length) {
     const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.12, 0.12, 5, 6), new THREE.MeshLambertMaterial({ color: '#2f343b' }), spots.length)
     const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.6, 1.5, 0.6), new THREE.MeshLambertMaterial({ color: '#2e9e4d' }), spots.length)

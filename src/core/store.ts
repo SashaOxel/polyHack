@@ -1,4 +1,4 @@
-import type { ElementRef, Marker, OsmDocument, OsmNode, OsmRelation, OsmWay } from './types'
+import type { ElementRef, OsmDocument, OsmNode, OsmRelation, OsmWay } from './types'
 import { emptyDocument } from './types'
 
 /**
@@ -9,8 +9,8 @@ import { emptyDocument } from './types'
  *   store.commit('Сдвинуть узел', tx => tx.setNode({ ...node, lat, lon }))
  */
 
-type Entity = OsmNode | OsmWay | OsmRelation | Marker
-type Kind = 'node' | 'way' | 'relation' | 'marker'
+type Entity = OsmNode | OsmWay | OsmRelation
+type Kind = 'node' | 'way' | 'relation'
 
 interface Change {
   kind: Kind
@@ -26,32 +26,9 @@ interface Entry {
 
 const clone = <T>(x: T): T => structuredClone(x)
 
-// Маркеры «только UI» запоминаем в браузере по имени файла: после перезагрузки страницы они на месте.
-// В .osm они не пишутся никогда.
-const markersKey = (fileName: string) => `uds-markers:${fileName}`
-const canPersist = () => typeof window !== 'undefined' && !!window.localStorage
-
-function loadMarkers(fileName: string): Map<number, Marker> {
-  const m = new Map<number, Marker>()
-  try {
-    if (!canPersist()) return m
-    const raw = window.localStorage.getItem(markersKey(fileName))
-    if (raw) for (const x of JSON.parse(raw) as Marker[]) m.set(x.id, x)
-  } catch { /* повреждённые данные или доступ закрыт — начинаем с пустого слоя */ }
-  return m
-}
-
-function saveMarkers(fileName: string, markers: Map<number, Marker>) {
-  try {
-    if (!canPersist()) return
-    if (markers.size) window.localStorage.setItem(markersKey(fileName), JSON.stringify([...markers.values()]))
-    else window.localStorage.removeItem(markersKey(fileName))
-  } catch { /* нет места или доступ закрыт — не критично */ }
-}
-
 export class Tx {
   readonly changes: Change[] = []
-  constructor(private doc: OsmDocument, private markers: Map<number, Marker>, private nextId: () => number) {}
+  constructor(private doc: OsmDocument, private nextId: () => number) {}
 
   /** Новый отрицательный id для созданных объектов (как в JOSM). */
   newId(): number {
@@ -59,7 +36,7 @@ export class Tx {
   }
 
   private map(kind: Kind): Map<number, Entity> {
-    return (kind === 'node' ? this.doc.nodes : kind === 'way' ? this.doc.ways : kind === 'relation' ? this.doc.relations : this.markers) as Map<number, Entity>
+    return (kind === 'node' ? this.doc.nodes : kind === 'way' ? this.doc.ways : this.doc.relations) as Map<number, Entity>
   }
 
   private put(kind: Kind, e: Entity) {
@@ -81,9 +58,6 @@ export class Tx {
   deleteNode(id: number) { this.del('node', id) }
   deleteWay(id: number) { this.del('way', id) }
   deleteRelation(id: number) { this.del('relation', id) }
-  /** Маркеры «только UI» (светофор, переход): в документ и в .osm не попадают. */
-  setMarker(m: Marker) { this.put('marker', m) }
-  deleteMarker(id: number) { this.del('marker', id) }
 }
 
 export type Listener = () => void
@@ -94,8 +68,6 @@ export class Store {
   version = 0
   /** Растёт только при изменении документа (загрузка, правка, undo/redo), но не при выборе объекта. */
   docVersion = 0
-  /** Светофоры и переходы, нарисованные в редакторе. Не часть документа и не сохраняются в .osm. */
-  markers = new Map<number, Marker>()
   selection: ElementRef | null = null
   fileName = 'untitled.osm'
   dirty = false
@@ -123,9 +95,7 @@ export class Store {
     this.redoStack = []
     this.selection = null
     this.dirty = false
-    this.markers = loadMarkers(fileName)
-    // новые id не должны совпасть с id восстановленных маркеров
-    this.idCounter = Math.min(0, ...[...this.markers.keys()])
+    this.idCounter = 0
     this.docVersion++
     this.emit()
   }
@@ -136,12 +106,12 @@ export class Store {
   }
 
   commit(label: string, fn: (tx: Tx) => void) {
-    const tx = new Tx(this.doc, this.markers, () => --this.idCounter)
+    const tx = new Tx(this.doc, () => --this.idCounter)
     fn(tx)
     if (!tx.changes.length) return
     this.undoStack.push({ label, changes: tx.changes })
     this.redoStack = []
-    this.touched(tx.changes)
+    this.dirty = true
     this.docVersion++
     this.emit()
   }
@@ -156,16 +126,10 @@ export class Store {
     this.emit()
   }
 
-  /** После правки: документ стал «несохранённым» только если менялся он, а не слой маркеров. */
-  private touched(changes: Change[]) {
-    if (changes.some((c) => c.kind !== 'marker')) this.dirty = true
-    if (changes.some((c) => c.kind === 'marker')) saveMarkers(this.fileName, this.markers)
-  }
-
   private apply(changes: Change[], dir: 'undo' | 'redo') {
     const list = dir === 'undo' ? [...changes].reverse() : changes
     for (const c of list) {
-      const m = (c.kind === 'node' ? this.doc.nodes : c.kind === 'way' ? this.doc.ways : c.kind === 'relation' ? this.doc.relations : this.markers) as Map<number, Entity>
+      const m = (c.kind === 'node' ? this.doc.nodes : c.kind === 'way' ? this.doc.ways : this.doc.relations) as Map<number, Entity>
       const target = dir === 'undo' ? c.before : c.after
       if (target) m.set(c.id, clone(target))
       else m.delete(c.id)
@@ -177,7 +141,7 @@ export class Store {
     if (!e) return
     this.apply(e.changes, 'undo')
     this.redoStack.push(e)
-    this.touched(e.changes)
+    this.dirty = true
     this.docVersion++
     this.emit()
   }
@@ -187,7 +151,7 @@ export class Store {
     if (!e) return
     this.apply(e.changes, 'redo')
     this.undoStack.push(e)
-    this.touched(e.changes)
+    this.dirty = true
     this.docVersion++
     this.emit()
   }

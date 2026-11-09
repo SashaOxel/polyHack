@@ -220,5 +220,4 @@ footer .keys { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; o
 .chips button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .note.strong { color: var(--text); font-weight: 600; }
 
-.uionly { font-style: normal; font-weight: 700; color: var(--accent); }
 .palette button kbd { font-size: 8px; }
