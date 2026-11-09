@@ -54,6 +54,42 @@ describe('3D-сцена', () => {
     expect(s.wayRibbon(-999, 2, 0)).toBeNull()
   })
 
+  it('якорь для знака скорости лежит над дорогой', () => {
+    const s = buildScene(doc, opts)
+    const a = s.wayAnchor(s.faceWay[0], 8)!
+    expect(a).not.toBeNull()
+    expect(a.y).toBeGreaterThanOrEqual(7.9)
+    expect([a.x, a.y, a.z].every(Number.isFinite)).toBe(true)
+    expect(s.wayAnchor(-1)).toBeNull()
+  })
+
+  it('маркеры «только UI» и переходы из OSM попадают в сцену', () => {
+    const base = buildScene(doc, opts)
+    expect(base.stats.crossings).toBeGreaterThan(0) // highway=crossing на проезжих дорогах файла
+    const way = [...doc.ways.values()].find((w) => w.tags.highway === 'residential' && w.nodes.length > 2)!
+    const n = doc.nodes.get(way.nodes[1])!
+    const withMarkers = buildScene(doc, {
+      ...opts,
+      markers: [
+        { id: -1, kind: 'signal', lat: n.lat, lon: n.lon, angle: 0, wayId: way.id },
+        { id: -2, kind: 'crossing', lat: n.lat, lon: n.lon, angle: 1, wayId: way.id },
+      ],
+    })
+    expect(withMarkers.stats.signals).toBe(base.stats.signals + 1)
+    expect(withMarkers.stats.crossings).toBe(base.stats.crossings + 1)
+  })
+
+  it('разметка полос: пунктир попадает в сцену, ширина дороги растёт с числом полос', () => {
+    const s = buildScene(doc, opts)
+    const meshes = s.root.children.filter((c): c is THREE.Mesh => (c as THREE.Mesh).isMesh && !!(c as THREE.Mesh).geometry.getAttribute('color'))
+    // дороги, настил (если есть мост) и разметка — все с vertexColors; разметка самая «мелкая» (много штрихов)
+    expect(meshes.length).toBeGreaterThanOrEqual(2)
+    const marks = meshes.filter((m) => m !== s.roads).sort((a, b) => b.geometry.getAttribute('position').count - a.geometry.getAttribute('position').count)[0]
+    expect(marks.geometry.getAttribute('position').count).toBeGreaterThan(1000)
+    // в первой версии у дорог без lanes была фиксированная ширина по классу; теперь она = полосы × 3,2 м
+    expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'primary', lanes: '3' } })).toBeCloseTo(9.6, 5)
+  })
+
   it('без зданий и без пешеходных — легче', () => {
     const a = buildScene(doc, { ...opts, buildings: false })
     expect(a.stats.buildings).toBe(0)
@@ -64,6 +100,7 @@ describe('3D-сцена', () => {
   it('ширина по полосам и классу', () => {
     expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'primary', lanes: '4' } })).toBeCloseTo(12.8, 5)
     expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'service' } })).toBe(3.5)
+    expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'residential' } })).toBeCloseTo(6.4, 5) // 2 полосы по умолчанию
     expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'footway' } })).toBe(1.8)
   })
 })

@@ -1,12 +1,27 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { deleteNode, deleteWay, reverseWay, setTags, splitAtNode } from '../core/ops'
+import { deleteMarker, deleteNode, deleteWay, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
+import { speedLimit } from '../core/roads'
 import { ROAD_TEMPLATES } from '../core/templates'
-import type { Tags } from '../core/types'
+import type { OsmWay, Tags } from '../core/types'
 import { ElevationEditor } from './ElevationEditor'
 
 const HIGHWAYS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'service',
   'primary_link', 'secondary_link', 'living_street', 'footway']
+
+/** Текст про ограничение скорости под полем ввода. */
+function describeSpeed(s: ReturnType<typeof speedLimit>, highway?: string): string {
+  const dir = s.forward != null || s.backward != null
+    ? ` · туда ${s.forward ?? '—'} / обратно ${s.backward ?? '—'}` : ''
+  if (s.source === 'default') {
+    return s.kmh
+      ? `Ограничение не задано в OSM. SUMO подставит ${s.kmh} км/ч по классу «${highway ?? '?'}»${s.raw ? ` (значение «${s.raw}» не распознано)` : ''}`
+      : 'Ограничение не задано в OSM'
+  }
+  if (s.kmh === null) return `Ограничения нет (maxspeed=${s.raw})${dir}`
+  if (s.source === 'zone') return `Ограничение ${s.kmh} км/ч (зона ${s.raw})${dir}`
+  return `Ограничение ${s.kmh} км/ч${s.raw && s.raw !== String(s.kmh) ? ` (maxspeed=${s.raw})` : ''}${dir}`
+}
 
 export function AttributePanel() {
   useSyncExternalStore(store.subscribe, store.getVersion)
@@ -18,11 +33,28 @@ export function AttributePanel() {
     setRows(el ? Object.entries(el.tags) : [])
   }, [el, store.version])
 
+  if (sel?.kind === 'marker') {
+    const m = store.markers.get(sel.id)
+    if (m) {
+      return (
+        <div className="panel-body">
+          <h3>{m.kind === 'signal' ? 'Светофор' : 'Пешеходный переход'} (только UI)</h3>
+          <div className="note strong">Нарисован в редакторе и в файл .osm не попадает. Нужен для наглядности.</div>
+          <div className="row">
+            <button className="danger" onClick={() => { deleteMarker(store, m.id); store.select(null) }} title="Delete">Удалить</button>
+          </div>
+          <div className="note">Чтобы светофор или переход попал в файл для симулятора, добавьте тег на узел дороги: highway=traffic_signals или highway=crossing.</div>
+        </div>
+      )
+    }
+  }
+
   if (!sel || !el) {
     return <div className="hint">Выберите узел или дорогу на карте.<br />Узел можно перетащить мышью.</div>
   }
 
   const kind = sel.kind as 'node' | 'way'
+  const speed = speedLimit(el as OsmWay)
   const apply = (tags: Tags) => setTags(store, kind, sel.id, tags)
   const commitRows = (r: [string, string][]) => apply(Object.fromEntries(r))
   const patch = (p: Tags) => apply({ ...el.tags, ...p })
@@ -44,11 +76,17 @@ export function AttributePanel() {
               <input type="number" min={1} max={8} value={el.tags.lanes ?? ''}
                 onChange={(e) => patch({ lanes: e.target.value })} />
             </label>
-            <label>Скорость
-              <input type="number" min={5} max={130} step={5} value={el.tags.maxspeed ?? ''}
+            <label>Скорость, км/ч
+              <input value={el.tags.maxspeed ?? ''} placeholder={speed.source === 'default' && speed.kmh ? `${speed.kmh}` : ''}
                 onChange={(e) => patch({ maxspeed: e.target.value })} />
             </label>
           </div>
+          <div className="chips">
+            {[20, 30, 40, 50, 60, 70, 80, 90].map((v) => (
+              <button key={v} className={speed.source !== 'default' && speed.kmh === v ? 'on' : ''} onClick={() => patch({ maxspeed: String(v) })}>{v}</button>
+            ))}
+          </div>
+          <div className={speed.source === 'default' ? 'note' : 'note strong'}>{describeSpeed(speed, el.tags.highway)}</div>
           <div className="row">
             <button onClick={() => patch({ oneway: el.tags.oneway === 'yes' ? 'no' : 'yes' })}>
               Односторонняя: {el.tags.oneway === 'yes' ? 'да' : 'нет'}

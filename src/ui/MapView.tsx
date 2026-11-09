@@ -1,15 +1,17 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
-import { project, unproject } from '../core/geo'
+import { offsetPolyline, project, unproject } from '../core/geo'
 import { Icon } from './icons'
 import { Minimap, scaleBar } from './overlays'
-import { drawRoad, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
-import { isDrivable, onewayDirection, roadStyle } from '../core/roads'
+import { drawCrossingIcon, drawSignalIcon } from './markerIcons'
+import { drawSpeedSign } from './speedSign'
+import { addMarker, drawRoad, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
+import { isDrivable, laneInfo, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
 import { store } from '../core/store'
-import type { Tags } from '../core/types'
+import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
 import { drawTiles, type View } from './tiles'
 
-export type Tool = 'select' | 'draw' | 'node'
+export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing'
 
 interface Props {
   tileUrl: string
@@ -47,6 +49,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
   const barLabel = useRef<HTMLSpanElement>(null)
   const coordsEl = useRef<HTMLDivElement>(null)
   const fitScale = useRef(0)
+  /** где показать знак скорости: точка клика по выбранной дороге */
+  const signAt = useRef<{ wayId: number; lat: number; lon: number } | null>(null)
   const miniDrag = useRef(false)
   const props = useRef({ tileUrl, issues, showPedestrian, tool, drawTags, onHint })
   props.current = { tileUrl, issues, showPedestrian, tool, drawTags, onHint }
@@ -159,6 +163,19 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     const order = (hw: string | undefined) => roadStyle(hw).width
     ways.sort((a, b) => order(a.tags.highway) - order(b.tags.highway))
 
+    // масштаб в реальных метрах: Меркатор растягивает расстояния на широте, поэтому делим на cos(широты)
+    const LANE_M = 3.2
+    const ppm = view.current.scale / Math.cos((unproject(view.current.cx, view.current.cy).lat * Math.PI) / 180) // px на метр
+    const laneW = LANE_M * ppm
+    const laneMode = laneW >= 4.5 // достаточно крупно, чтобы рисовать полосы
+    /** Ширина дороги на экране: не уже обычной линии и не уже реальной ширины полос. */
+    const roadPx = (way: OsmWay) => {
+      const st = roadStyle(way.tags.highway)
+      const base = (st.width + ((Number(way.tags.lanes) || 1) - 1) * 0.8) * zoomK
+      const li = laneInfo(way)
+      return li ? Math.max(base, li.total * laneW) : base
+    }
+
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
     const sel = store.selection
@@ -166,20 +183,40 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       const drivable = isDrivable(way)
       if (!drivable && !props.current.showPedestrian) continue
       const st = roadStyle(way.tags.highway)
-      const lanes = Number(way.tags.lanes) || 1
+      const li = laneInfo(way)
+      const screenPts: { x: number; y: number }[] = []
+      for (const nid of way.nodes) { const p = pos(nid); if (p) screenPts.push(p) }
       ctx.beginPath()
-      let started = false
-      for (const nid of way.nodes) {
-        const p = pos(nid)
-        if (!p) continue
-        if (!started) { ctx.moveTo(p.x, p.y); started = true } else ctx.lineTo(p.x, p.y)
-      }
-      ctx.lineWidth = (st.width + (lanes - 1) * 0.8) * zoomK
+      screenPts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)))
+      const W = roadPx(way)
+      ctx.lineWidth = W
       ctx.strokeStyle = st.color
       if (!drivable) ctx.setLineDash([3, 3]); else ctx.setLineDash([])
       if (way.tags.bridge) { ctx.save(); ctx.lineWidth += 3; ctx.strokeStyle = '#333'; ctx.stroke(); ctx.restore() }
+      const lanesVisible = drivable && laneMode && !!li && screenPts.length >= 2
+      if (lanesVisible) {
+        // крупный план: цветной кант класса дороги и «асфальт» внутри, чтобы разметка читалась на любом цвете
+        ctx.save(); ctx.lineWidth = W + 4; ctx.stroke(); ctx.restore()
+        ctx.strokeStyle = '#59626f'
+      }
       ctx.stroke()
       ctx.setLineDash([])
+
+      // разметка: пунктир между полосами; встречная линия двусторонней дороги жёлтая
+      if (lanesVisible && li!.total >= 2) {
+        ctx.save()
+        ctx.lineCap = 'butt'
+        ctx.setLineDash([Math.max(4, 3 * ppm), Math.max(4, 5 * ppm)])
+        ctx.lineWidth = Math.max(1.2, 0.16 * ppm)
+        const total = li!.total * laneW
+        for (let i = 1; i < li!.total; i++) {
+          ctx.strokeStyle = li!.centerAfter === i ? '#ffd54f' : 'rgba(255,255,255,0.95)'
+          ctx.beginPath()
+          offsetPolyline(screenPts, -total / 2 + i * laneW).forEach((q, k) => (k ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)))
+          ctx.stroke()
+        }
+        ctx.restore()
+      }
 
       // стрелки направления
       const dir = onewayDirection(way)
@@ -209,13 +246,38 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       if (!n) continue
       const p = pos(id)!
       if (p.x < -10 || p.y < -10 || p.x > w + 10 || p.y > h + 10) continue
-      if (n.tags.highway === 'traffic_signals') {
-        ctx.fillStyle = '#2e7d32'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1
-        ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 7); ctx.fill(); ctx.stroke()
+      if (n.tags.highway === 'traffic_signals' || n.tags.highway === 'crossing') {
+        // рисуется иконкой в проходе ниже
       } else if (showNodes) {
         ctx.fillStyle = '#fff'; ctx.strokeStyle = '#444'; ctx.lineWidth = 1
         ctx.beginPath(); ctx.arc(p.x, p.y, 2.5, 0, 7); ctx.fill(); ctx.stroke()
       }
+    }
+
+    // светофоры и переходы: из OSM (узлы highway=traffic_signals / crossing) и маркеры «только UI»
+    const iconSize = Math.max(16, Math.min(28, 10 * zoomK + 8))
+    const crossLen = (hw: string | undefined) => roadStyle(hw).width * zoomK * 2.4
+    const drawnIcons = new Set<number>()
+    for (const way of ways) {
+      if (!isDrivable(way) && !props.current.showPedestrian) continue
+      way.nodes.forEach((nid, i) => {
+        const n = doc.nodes.get(nid)
+        const hw = n?.tags.highway
+        if (!n || (hw !== 'traffic_signals' && hw !== 'crossing') || drawnIcons.has(nid)) return
+        if (hw === 'crossing' && view.current.scale < 0.25) return // на мелком масштабе зебры только мусорят
+        const p = pos(nid)!
+        if (p.x < -20 || p.y < -20 || p.x > w + 20 || p.y > h + 20) return
+        drawnIcons.add(nid)
+        if (hw === 'traffic_signals') { drawSignalIcon(ctx, p.x, p.y, iconSize, false); return }
+        const a = pos(way.nodes[Math.max(0, i - 1)]), b = pos(way.nodes[Math.min(way.nodes.length - 1, i + 1)])
+        drawCrossingIcon(ctx, p.x, p.y, a && b ? Math.atan2(b.y - a.y, b.x - a.x) : 0, crossLen(way.tags.highway), false)
+      })
+    }
+    for (const m of store.markers.values()) {
+      const p = toScreen(m.lat, m.lon, w, h)
+      if (p.x < -20 || p.y < -20 || p.x > w + 20 || p.y > h + 20) continue
+      if (m.kind === 'signal') drawSignalIcon(ctx, p.x, p.y, iconSize, true)
+      else drawCrossingIcon(ctx, p.x, p.y, -m.angle, crossLen(m.wayId ? doc.ways.get(m.wayId)?.tags.highway : undefined), true)
     }
 
     // проблемы
@@ -276,11 +338,37 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       if (way) {
         ctx.beginPath()
         way.nodes.forEach((nid, i) => { const p = pos(nid); if (p) (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)) })
-        ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 8 * zoomK * 0.7; ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1
+        ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = Math.max(8 * zoomK * 0.7, roadPx(way) + 6); ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1
+      }
+    } else if (sel?.kind === 'marker') {
+      const m = store.markers.get(sel.id)
+      if (m) {
+        const p = toScreen(m.lat, m.lon, w, h)
+        ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 3
+        ctx.beginPath(); ctx.arc(p.x, p.y, iconSize * 0.85, 0, 7); ctx.stroke()
       }
     } else if (sel?.kind === 'node') {
       const p = pos(sel.id)
       if (p) { ctx.strokeStyle = '#00b0ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, 7); ctx.stroke() }
+    }
+
+    // знак скоростного ограничения у выбранной дороги
+    if (sel?.kind === 'way' && props.current.tool === 'select') {
+      const way = doc.ways.get(sel.id)
+      if (way) {
+        if (signAt.current?.wayId !== sel.id) {
+          const m = wayMidpoint(doc, way) // выбрана не кликом (например, из списка проблем) — ставим на середину
+          signAt.current = m ? { wayId: sel.id, ...m } : null
+        }
+        const at = signAt.current
+        if (at) {
+          const p = toScreen(at.lat, at.lon, w, h)
+          const sx = Math.max(24, Math.min(w - 24, p.x)), sy = Math.max(40, Math.min(h - 24, p.y - 26))
+          ctx.strokeStyle = '#263041'; ctx.lineWidth = 1.5
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(sx, sy + 15); ctx.stroke()
+          drawSpeedSign(ctx, sx, sy, speedLimit(way))
+        }
+      }
     }
 
     updateOverlays(w, h, dpr)
@@ -290,8 +378,12 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
   function pick(sx: number, sy: number, w: number, h: number) {
     const doc = store.doc
     const ped = props.current.showPedestrian
+    for (const m of store.markers.values()) {
+      const p = toScreen(m.lat, m.lon, w, h)
+      if (Math.hypot(p.x - sx, p.y - sy) < 13) return { kind: 'marker' as const, id: m.id }
+    }
     let bestN: { id: number; d: number } | null = null
-    let bestW: { id: number; d: number } | null = null
+    let bestW: { id: number; d: number; x: number; y: number } | null = null
     for (const way of doc.ways.values()) {
       if (!way.tags.highway) continue
       if (!isDrivable(way) && !ped) continue
@@ -309,15 +401,39 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
           const dx = p.x - prev.x, dy = p.y - prev.y
           const l2 = dx * dx + dy * dy || 1
           const t = Math.max(0, Math.min(1, ((sx - prev.x) * dx + (sy - prev.y) * dy) / l2))
-          const d = Math.hypot(prev.x + t * dx - sx, prev.y + t * dy - sy)
-          if (d < HIT && (!bestW || d < bestW.d)) bestW = { id: way.id, d }
+          const px = prev.x + t * dx, py = prev.y + t * dy
+          const d = Math.hypot(px - sx, py - sy)
+          if (d < HIT && (!bestW || d < bestW.d)) bestW = { id: way.id, d, x: px, y: py }
         }
         prev = p
       }
     }
     if (bestN) return { kind: 'node' as const, id: bestN.id }
-    if (bestW) return { kind: 'way' as const, id: bestW.id }
+    if (bestW) return { kind: 'way' as const, id: bestW.id, at: fromScreen(bestW.x, bestW.y, w, h) }
     return null
+  }
+
+  /** Ближайшая точка на проезжей дороге и направление дороги там (для светофора/перехода). */
+  function nearestRoadPoint(sx: number, sy: number, w: number, h: number) {
+    const doc = store.doc
+    let best: { wayId: number; d: number; x: number; y: number; a: { lat: number; lon: number }; b: { lat: number; lon: number } } | null = null
+    for (const way of doc.ways.values()) {
+      if (!isDrivable(way)) continue
+      for (let i = 0; i < way.nodes.length - 1; i++) {
+        const na = doc.nodes.get(way.nodes[i]), nb = doc.nodes.get(way.nodes[i + 1])
+        if (!na || !nb) continue
+        const a = toScreen(na.lat, na.lon, w, h), b = toScreen(nb.lat, nb.lon, w, h)
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy || 1
+        const t = Math.max(0, Math.min(1, ((sx - a.x) * dx + (sy - a.y) * dy) / l2))
+        const x = a.x + t * dx, y = a.y + t * dy
+        const d = Math.hypot(x - sx, y - sy)
+        if (d < HIT * 1.5 && (!best || d < best.d)) best = { wayId: way.id, d, x, y, a: na, b: nb }
+      }
+    }
+    if (!best) return null
+    const ll = fromScreen(best.x, best.y, w, h)
+    const pa = project(best.a.lat, best.a.lon), pb = project(best.b.lat, best.b.lon)
+    return { wayId: best.wayId, lat: ll.lat, lon: ll.lon, angle: Math.atan2(pb.y - pa.y, pb.x - pa.x) }
   }
 
   // ----- привязка (snap) для рисования и склейки -----
@@ -471,9 +587,21 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       } else if (!d.moved) {
         const tool = props.current.tool
         if (tool === 'select') {
-          store.select(pick(sx, sy, r.width, r.height))
+          const hit = pick(sx, sy, r.width, r.height)
+          // знак скорости появится в точке клика по дороге
+          signAt.current = hit?.kind === 'way' ? { wayId: hit.id, lat: hit.at.lat, lon: hit.at.lon } : null
+          store.select(hit ? { kind: hit.kind, id: hit.id } : null)
         } else if (tool === 'draw') {
           addDraftPoint(sx, sy, r.width, r.height)
+        } else if (tool === 'signal' || tool === 'crossing') {
+          const rp = nearestRoadPoint(sx, sy, r.width, r.height)
+          if (rp) {
+            const id = addMarker(store, tool, rp.lat, rp.lon, rp.angle, rp.wayId)
+            store.select({ kind: 'marker', id })
+            props.current.onHint(`${tool === 'signal' ? 'Светофор' : 'Переход'} добавлен — только на UI, в .osm не попадёт. Ctrl+Z — отменить`)
+          } else {
+            props.current.onHint('Кликните по дороге для автомобилей')
+          }
         } else if (tool === 'node') {
           const s = snap(sx, sy, r.width, r.height)
           if (s?.kind === 'way') {

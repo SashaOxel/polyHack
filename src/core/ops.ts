@@ -1,7 +1,7 @@
 import { cumulativeDistance } from './elevation'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
-import type { OsmDocument, OsmRelation, OsmWay, Tags } from './types'
+import type { Marker, OsmDocument, OsmRelation, OsmWay, Tags } from './types'
 
 /**
  * Операции редактирования поверх store.commit. Каждая операция = один шаг undo.
@@ -301,4 +301,21 @@ export function mergeNodes(store: Store, keepId: number, removeId: number) {
     if (current && Object.keys(rem.tags).length) tx.setNode({ ...current, tags: { ...rem.tags, ...current.tags } })
     tx.deleteNode(removeId)
   })
+}
+
+// ---------- маркеры «только UI» (светофоры и переходы, не попадают в .osm) ----------
+
+/** Поставить светофор или переход. angle — направление дороги в этой точке (север вверх, восток = 0). */
+export function addMarker(store: Store, kind: Marker['kind'], lat: number, lon: number, angle: number, wayId?: number): number {
+  let id = 0
+  store.commit(kind === 'signal' ? 'Добавить светофор (UI)' : 'Добавить переход (UI)', (tx) => {
+    id = tx.newId()
+    tx.setMarker({ id, kind, lat, lon, angle, wayId })
+  })
+  return id
+}
+
+export function deleteMarker(store: Store, id: number) {
+  if (!store.markers.has(id)) return
+  store.commit('Удалить маркер (UI)', (tx) => tx.deleteMarker(id))
 }

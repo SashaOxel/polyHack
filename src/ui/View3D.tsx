@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { store } from '../core/store'
+import { speedLimit } from '../core/roads'
 import { buildScene, disposeScene, type SceneData } from './scene3d'
+import { speedSignCanvas } from './speedSign'
 
 interface Props {
   showPedestrian: boolean
@@ -29,6 +31,9 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     controls: OrbitControls
     data: SceneData | null
     sel: THREE.Mesh | null
+    sign: THREE.Sprite | null
+    /** куда кликнули по дороге: знак скорости ставим сюда */
+    click: { wayId: number; point: THREE.Vector3 } | null
     render: () => void
     framed: boolean
     fileKey: string
@@ -64,7 +69,7 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     ro.observe(el)
     resize()
 
-    gl.current = { renderer, scene, camera, controls, data: null, sel: null, render, framed: false, fileKey: store.fileName }
+    gl.current = { renderer, scene, camera, controls, data: null, sel: null, sign: null, click: null, render, framed: false, fileKey: store.fileName }
     // в режиме разработки доступно из консоли: __gl3d.camera, __gl3d.controls
     if (import.meta.env.DEV) (window as unknown as { __gl3d: unknown }).__gl3d = gl.current
 
@@ -82,6 +87,7 @@ export default function View3D({ showPedestrian, onHint }: Props) {
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera)
       const hit = ray.intersectObject(g.data.roads, false)[0]
       const wayId = hit?.faceIndex != null ? g.data.faceWay[hit.faceIndex] : undefined
+      g.click = wayId !== undefined && hit ? { wayId, point: hit.point.clone() } : null
       store.select(wayId !== undefined ? { kind: 'way', id: wayId } : null)
     }
     renderer.domElement.addEventListener('pointerdown', onDown)
@@ -93,6 +99,7 @@ export default function View3D({ showPedestrian, onHint }: Props) {
       renderer.domElement.removeEventListener('pointerdown', onDown)
       renderer.domElement.removeEventListener('pointerup', onUp)
       if (gl.current?.data) disposeScene(gl.current.data.root)
+      if (gl.current?.sign) { gl.current.sign.material.map?.dispose(); gl.current.sign.material.dispose() }
       renderer.dispose()
       renderer.domElement.remove()
       gl.current = null
@@ -106,19 +113,20 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     if (g.fileKey !== store.fileName) { g.framed = false; g.fileKey = store.fileName } // новый файл → камера заново
     if (g.data) { g.scene.remove(g.data.root); disposeScene(g.data.root) }
     if (g.sel) { g.sel.geometry.dispose(); g.scene.remove(g.sel); g.sel = null }
+    if (g.sign) { g.sign.material.map?.dispose(); g.sign.material.dispose(); g.scene.remove(g.sign); g.sign = null }
     if (store.doc.nodes.size === 0) { g.data = null; setStats(null); g.render(); return }
 
     const t0 = performance.now()
-    const data = buildScene(store.doc, { zScale, buildings, pedestrian: showPedestrian })
+    const data = buildScene(store.doc, { zScale, buildings, pedestrian: showPedestrian, markers: [...store.markers.values()] })
     g.data = data
     g.scene.add(data.root)
     setStats(data.stats)
-    onHint(`3D: ${data.stats.roads} дорог, ${data.stats.buildings} зданий, ${data.stats.bridges} мостов (${Math.round(performance.now() - t0)} мс)`)
+    onHint(`3D: ${data.stats.roads} дорог, ${data.stats.buildings} зданий, ${data.stats.bridges} мостов, ${data.stats.signals} светофоров, ${data.stats.crossings} переходов (${Math.round(performance.now() - t0)} мс)`)
 
     // первый кадр после загрузки файла: камера «сверху под углом»
     if (!g.framed) {
       const r = data.radius
-      g.camera.position.set(0, r * 1.5, r * 1.7)
+      g.camera.position.set(0, r * 1.2, r * 1.35)
       g.controls.target.set(0, 0, 0)
       g.camera.far = r * 30
       g.camera.updateProjectionMatrix()
@@ -134,12 +142,25 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     const g = gl.current
     if (!g?.data) return
     if (g.sel) { g.sel.geometry.dispose(); g.scene.remove(g.sel); g.sel = null }
+    if (g.sign) { g.sign.material.map?.dispose(); g.sign.material.dispose(); g.scene.remove(g.sign); g.sign = null }
     const s = store.selection
     if (s?.kind === 'way') {
       const geo = g.data.wayRibbon(s.id, 2.5, 0.2)
       if (geo) {
         g.sel = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }))
         g.scene.add(g.sel)
+      }
+      // знак скорости: над точкой клика, а если выбрали не кликом — над серединой дороги
+      const way = store.doc.ways.get(s.id)
+      const anchor = g.click?.wayId === s.id ? g.click.point.clone().add(new THREE.Vector3(0, 8, 0)) : g.data.wayAnchor(s.id, 8)
+      if (way && anchor) {
+        const tex = new THREE.CanvasTexture(speedSignCanvas(speedLimit(way)))
+        tex.colorSpace = THREE.SRGBColorSpace
+        g.sign = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, transparent: true }))
+        g.sign.scale.set(0.055, 0.055, 1) // sizeAttenuation=false: размер в долях высоты окна, не зависит от расстояния
+        g.sign.position.copy(anchor)
+        g.sign.renderOrder = 10
+        g.scene.add(g.sign)
       }
     }
     g.render()
@@ -149,7 +170,7 @@ export default function View3D({ showPedestrian, onHint }: Props) {
     const g = gl.current
     if (!g?.data) return
     const r = g.data.radius
-    g.camera.position.set(0, r * 1.5, r * 1.7)
+    g.camera.position.set(0, r * 1.2, r * 1.35)
     g.controls.target.set(0, 0, 0)
     g.controls.update()
     g.render()

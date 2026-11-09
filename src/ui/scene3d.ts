@@ -1,9 +1,9 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { elevationContext, wayProfile } from '../core/elevation'
-import { project } from '../core/geo'
-import { isDrivable, roadStyle } from '../core/roads'
-import type { OsmDocument, OsmWay } from '../core/types'
+import { dashPolyline, offsetPolyline, project } from '../core/geo'
+import { isDrivable, laneInfo, roadStyle } from '../core/roads'
+import type { Marker, OsmDocument, OsmWay } from '../core/types'
 
 /**
  * Построитель 3D-сцены из документа. Чистая функция: three.js работает и в Node, поэтому её можно тестировать.
@@ -15,6 +15,8 @@ export interface BuildOptions {
   zScale: number
   buildings: boolean
   pedestrian: boolean
+  /** светофоры и переходы «только UI» из редактора */
+  markers?: Marker[]
 }
 
 export interface SceneData {
@@ -26,24 +28,18 @@ export interface SceneData {
   radius: number
   /** лента дороги для подсветки выбранной: шире и чуть выше обычной */
   wayRibbon(wayId: number, extraWidth: number, dy: number): THREE.BufferGeometry | null
-  stats: { roads: number; buildings: number; bridges: number; signals: number }
+  /** точка над серединой дороги (по длине) — для подписи/знака */
+  wayAnchor(wayId: number, lift?: number): THREE.Vector3 | null
+  stats: { roads: number; buildings: number; bridges: number; signals: number; crossings: number }
 }
 
 const LANE_W = 3.2
 
-/** Ширина проезжей части, м: по `lanes`, иначе по классу дороги. */
+/** Ширина проезжей части, м: число полос × 3,2 м (по тегам, иначе по правилам OSM для двусторонней/односторонней). */
 export function roadWidth(way: OsmWay): number {
-  const hw = way.tags.highway ?? ''
-  if (!isDrivable(way)) return 1.8
-  const lanes = Number(way.tags.lanes)
-  if (lanes > 0) return Math.max(3.5, lanes * LANE_W)
-  switch (hw) {
-    case 'motorway': case 'trunk': case 'primary': return 7.5
-    case 'secondary': return 6.5
-    case 'tertiary': return 6
-    case 'service': return 3.5
-    default: return 5.5
-  }
+  const li = laneInfo(way)
+  if (!li) return 1.8 // пешеходные дорожки
+  return Math.max(3.5, li.total * LANE_W)
 }
 
 interface P { x: number; y: number; z: number }
@@ -126,8 +122,12 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
   // ---- дороги ----
   const roadBuf: Buf = { pos: [], col: [], idx: [] }
   const slabBuf: Buf = { pos: [], col: [], idx: [] }
+  const markBuf: Buf = { pos: [], col: [], idx: [] } // дорожная разметка: пунктир между полосами
+  const white = new THREE.Color('#f6f6f2'), yellow = new THREE.Color('#ffd54f')
   const faceWay: number[] = []
   const pillars: P[] = []
+  const crossings: { x: number; y: number; z: number; dx: number; dz: number; width: number }[] = []
+  const crossingNodes = new Set<number>()
   const nodeY = new Map<number, number>()
   const slabColor = new THREE.Color('#2b2f36')
   let bridges = 0
@@ -137,8 +137,31 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     const pts = wayPoints(way, 0.01 * roadStyle(way.tags.highway).width)
     for (const q of pts) if (q.id !== undefined && !nodeY.has(q.id)) nodeY.set(q.id, q.y)
     const color = new THREE.Color(drivable ? roadStyle(way.tags.highway).color : '#d9d3c7')
-    if (drivable) color.lerp(new THREE.Color('#4a515d'), 0.3) // приглушаем под «асфальт», класс остаётся читаемым
+    if (drivable) color.lerp(new THREE.Color('#4a515d'), 0.5) // приглушаем под «асфальт», класс остаётся читаемым
     addRibbon(roadBuf, pts, roadWidth(way), color, { faceWay, wayId: way.id })
+
+    // разметка полос: пунктир между полосами, встречная линия жёлтая; у перекрёстков (6 м от концов) не рисуем
+    const li = drivable ? laneInfo(way) : null
+    if (li && li.total >= 2 && pts.length >= 2) {
+      const flat = pts.map((q) => ({ x: q.x, y: q.z, h: q.y })) // «y» здесь — вторая горизонтальная ось (Z мира)
+      const widthM = li.total * LANE_W
+      for (let i = 1; i < li.total; i++) {
+        const line = offsetPolyline(flat, -widthM / 2 + i * LANE_W)
+        for (const piece of dashPolyline(line, 3, 5, 6)) {
+          addRibbon(markBuf, piece.map((q) => ({ x: q.x, y: (q.h ?? 0) + 0.11, z: q.y })), 0.15, li.centerAfter === i ? yellow : white)
+        }
+      }
+    }
+
+    // пешеходные переходы из OSM (узлы highway=crossing на проезжей дороге)
+    if (drivable) {
+      pts.forEach((q, i) => {
+        if (q.id === undefined || crossingNodes.has(q.id) || doc.nodes.get(q.id)?.tags.highway !== 'crossing') return
+        crossingNodes.add(q.id)
+        const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)]
+        crossings.push({ x: q.x, y: q.y, z: q.z, dx: b.x - a.x, dz: b.z - a.z, width: roadWidth(way) })
+      })
+    }
 
     const isBridge = way.tags.bridge !== undefined && way.tags.bridge !== 'no'
     if (isBridge && drivable) {
@@ -157,6 +180,9 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     ? new THREE.Mesh(toGeometry(roadBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     : null
   if (roads) root.add(roads)
+  if (markBuf.idx.length) {
+    root.add(new THREE.Mesh(toGeometry(markBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
+  }
   if (slabBuf.idx.length) {
     root.add(new THREE.Mesh(toGeometry(slabBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
   }
@@ -174,19 +200,66 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     root.add(inst)
   }
 
-  // ---- светофоры ----
-  const signals = [...doc.nodes.values()].filter((n) => n.tags.highway === 'traffic_signals' && nodeY.has(n.id))
-  if (signals.length) {
-    const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.12, 0.12, 5, 6), new THREE.MeshLambertMaterial({ color: '#2f343b' }), signals.length)
-    const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.6, 1.5, 0.6), new THREE.MeshLambertMaterial({ color: '#2e9e4d' }), signals.length)
+  // ---- маркеры «только UI»: высота берётся с дороги, на которую они поставлены ----
+  const groundY = (m: Marker, x: number, z: number) => {
+    const way = m.wayId !== undefined ? doc.ways.get(m.wayId) : undefined
+    if (!way) return 0
+    let best = Infinity, y = 0
+    for (const q of wayPoints(way)) {
+      const d = Math.hypot(q.x - x, q.z - z)
+      if (d < best) { best = d; y = q.y }
+    }
+    return y
+  }
+  const uiSignals: { x: number; y: number; z: number }[] = []
+  for (const m of opts.markers ?? []) {
+    const w = world(m.lat, m.lon)
+    const y = groundY(m, w.x, w.z)
+    if (m.kind === 'signal') uiSignals.push({ x: w.x, y, z: w.z })
+    else {
+      const way = m.wayId !== undefined ? doc.ways.get(m.wayId) : undefined
+      // angle — «север вверх», в мире X на восток, Z на юг
+      crossings.push({ x: w.x, y, z: w.z, dx: Math.cos(m.angle), dz: -Math.sin(m.angle), width: way ? roadWidth(way) : 6 })
+    }
+  }
+
+  // ---- светофоры (OSM + UI) ----
+  const spots = [
+    ...[...doc.nodes.values()].filter((n) => n.tags.highway === 'traffic_signals' && nodeY.has(n.id))
+      .map((n) => { const w = world(n.lat, n.lon); return { x: w.x, y: nodeY.get(n.id) ?? 0, z: w.z } }),
+    ...uiSignals,
+  ]
+  if (spots.length) {
+    const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.12, 0.12, 5, 6), new THREE.MeshLambertMaterial({ color: '#2f343b' }), spots.length)
+    const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.6, 1.5, 0.6), new THREE.MeshLambertMaterial({ color: '#2e9e4d' }), spots.length)
     const m = new THREE.Matrix4()
-    signals.forEach((n, i) => {
-      const w = world(n.lat, n.lon)
-      const y = nodeY.get(n.id) ?? 0
-      m.makeTranslation(w.x, y + 2.5, w.z); poles.setMatrixAt(i, m)
-      m.makeTranslation(w.x, y + 5.2, w.z); heads.setMatrixAt(i, m)
+    spots.forEach((p, i) => {
+      m.makeTranslation(p.x, p.y + 2.5, p.z); poles.setMatrixAt(i, m)
+      m.makeTranslation(p.x, p.y + 5.2, p.z); heads.setMatrixAt(i, m)
     })
     root.add(poles, heads)
+  }
+
+  // ---- пешеходные переходы: белая «зебра» поперёк дороги ----
+  if (crossings.length) {
+    const STRIPES = 6
+    const stripes = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: '#f4f4f2' }), crossings.length * STRIPES)
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), sc = new THREE.Vector3()
+    const up = new THREE.Vector3(0, 1, 0)
+    let n = 0
+    for (const c of crossings) {
+      const len = Math.hypot(c.dx, c.dz) || 1
+      const ux = c.dx / len, uz = c.dz / len
+      q.setFromAxisAngle(up, -Math.atan2(uz, ux)) // ось X полосы вдоль дороги
+      for (let k = 0; k < STRIPES; k++) {
+        const t = (k - (STRIPES - 1) / 2) * 1.1
+        pos.set(c.x + ux * t, c.y + 0.14, c.z + uz * t)
+        sc.set(0.55, 0.06, c.width * 0.95)
+        m.compose(pos, q, sc)
+        stripes.setMatrixAt(n++, m)
+      }
+    }
+    root.add(stripes)
   }
 
   // ---- здания ----
@@ -227,6 +300,25 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
   const wayById = (id: number) => doc.ways.get(id)
   return {
     root, roads, faceWay, radius,
+    wayAnchor(wayId, lift = 6) {
+      const way = wayById(wayId)
+      if (!way) return null
+      const pts = wayPoints(way)
+      if (!pts.length) return null
+      let total = 0
+      for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z)
+      let left = total / 2
+      for (let i = 1; i < pts.length; i++) {
+        const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z)
+        if (left <= seg || i === pts.length - 1) {
+          const t = seg > 0 ? Math.min(1, left / seg) : 0
+          const a = pts[i - 1], b = pts[i]
+          return new THREE.Vector3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t + lift, a.z + (b.z - a.z) * t)
+        }
+        left -= seg
+      }
+      return new THREE.Vector3(pts[0].x, pts[0].y + lift, pts[0].z)
+    },
     wayRibbon(wayId, extraWidth, dy) {
       const way = wayById(wayId)
       if (!way) return null
@@ -234,7 +326,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
       addRibbon(buf, wayPoints(way, 0.3 + dy), roadWidth(way) + extraWidth, new THREE.Color('#00b0ff'))
       return buf.idx.length ? toGeometry(buf) : null
     },
-    stats: { roads: hwWays.length, buildings: buildingCount, bridges, signals: signals.length },
+    stats: { roads: hwWays.length, buildings: buildingCount, bridges, signals: spots.length, crossings: crossings.length },
   }
 }
 

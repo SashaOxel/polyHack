@@ -53,7 +53,21 @@ export interface OsmDocument {
   relations: Map<number, OsmRelation>
 }
 
-export type ElementKind = 'node' | 'way' | 'relation'
+export type ElementKind = 'node' | 'way' | 'relation' | 'marker'
+
+/**
+ * Маркер «только UI»: светофор или пешеходный переход, нарисованный в редакторе.
+ * Живёт в store.markers, а не в OsmDocument, поэтому НИКОГДА не попадает в .osm.
+ */
+export interface Marker {
+  id: number
+  kind: 'signal' | 'crossing'
+  lat: number
+  lon: number
+  /** направление дороги в этой точке, радианы, в системе «север вверх» (восток = 0, север = π/2) */
+  angle: number
+  wayId?: number
+}
 
 export interface ElementRef {
   kind: ElementKind

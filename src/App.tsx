@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
+import { deleteMarker, deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
@@ -105,6 +105,8 @@ export function App() {
       else if (key === 'v') setTool('select')
       else if (key === 'd' && mode === '2d') setTool('draw')
       else if (key === 'n' && mode === '2d') setTool('node')
+      else if (key === 't' && mode === '2d') setTool('signal')
+      else if (key === 'c' && mode === '2d') setTool('crossing')
       // действия над выбранным объектом (в режиме рисования Backspace убирает точку, а не удаляет)
       else if (sel?.kind === 'way' && key === 'r') reverseWay(store, sel.id)
       else if (sel?.kind === 'node' && key === 's') {
@@ -114,6 +116,7 @@ export function App() {
       else if (e.key === 'Delete' || (e.key === 'Backspace' && tool !== 'draw')) {
         if (sel?.kind === 'way') { deleteWay(store, sel.id); store.select(null) }
         else if (sel?.kind === 'node') { deleteNode(store, sel.id); store.select(null) }
+        else if (sel?.kind === 'marker') { deleteMarker(store, sel.id); store.select(null) }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -154,7 +157,9 @@ export function App() {
   const TOOLS: { id: Tool; icon: string; label: string; key: string }[] = [
     { id: 'select', icon: 'select', label: 'Выбрать', key: 'V' },
     { id: 'draw', icon: 'road', label: 'Дорога', key: 'D' },
-    { id: 'node', icon: 'node', label: 'Узел', key: 'N' },
+    { id: 'node', icon: 'node', label: 'Узел на дороге', key: 'N' },
+    { id: 'signal', icon: 'signal', label: 'Светофор (только UI)', key: 'T' },
+    { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход (только UI)', key: 'C' },
   ]
 
   return (
@@ -207,6 +212,7 @@ export function App() {
             <label><input type="checkbox" checked={onlyRoads} onChange={(e) => setOnlyRoads(e.target.checked)} /> Только дороги (без зданий и маршрутов)</label>
             <label><input type="checkbox" checked={withPed} disabled={!onlyRoads} onChange={(e) => setWithPed(e.target.checked)} /> Добавить пешеходные</label>
             <label><input type="checkbox" checked={keepMeta} onChange={(e) => setKeepMeta(e.target.checked)} /> Сохранить метаданные OSM</label>
+            <div className="field"><span>Светофоры и переходы, добавленные инструментами T и C, существуют только в редакторе и в файл не попадают.</span></div>
           </div>
         </details>
       </header>
@@ -241,6 +247,12 @@ export function App() {
                 {DRAW_TEMPLATES.map((t, i) => <option key={t.name} value={i}>{t.name}</option>)}
               </select>
               <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена</span>
+            </div>
+          )}
+          {mode === '2d' && (tool === 'signal' || tool === 'crossing') && (
+            <div className="tool-card">
+              <b>{tool === 'signal' ? 'Светофор' : 'Пешеходный переход'}</b>
+              <span>Кликните по дороге. <em className="uionly">Только на UI</em> — в .osm не сохраняется</span>
             </div>
           )}
           {mode === '2d' && tool === 'node' && (
@@ -282,7 +294,7 @@ export function App() {
 
       <footer>
         <span className="status">{status}{store.dirty && <em> · есть несохранённые изменения</em>}</span>
-        <span className="keys">2/3 режим · V выбрать · D дорога · N узел · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
+        <span className="keys">2/3 режим · V выбрать · D дорога · N узел · T светофор · C переход · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
       </footer>
     </div>
   )

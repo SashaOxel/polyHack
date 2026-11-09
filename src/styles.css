@@ -214,3 +214,11 @@ footer .keys { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; o
 .loading3d { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; color: var(--muted); background: var(--bg); }
 .note { margin-top: 4px; font-size: 11px; color: var(--muted); }
 .note.warn { color: var(--warn); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 4px; }
+.chips button { padding: 1px 8px; font-size: 11px; border-radius: 999px; }
+.chips button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.note.strong { color: var(--text); font-weight: 600; }
+
+.uionly { font-style: normal; font-weight: 700; color: var(--accent); }
+.palette button kbd { font-size: 8px; }
