@@ -10,6 +10,8 @@ export interface RoadTemplate {
   tags: Tags
   /** показывать в списке для рисования новых дорог (мост — это дополнение, а не отдельная дорога) */
   forDrawing: boolean
+  /** car — для машин, foot — пешеходная (в симулятор по умолчанию не идёт, в экспорте включается отдельной галочкой) */
+  group?: 'car' | 'foot'
 }
 
 export const ROAD_TEMPLATES: RoadTemplate[] = [
@@ -19,6 +21,15 @@ export const ROAD_TEMPLATES: RoadTemplate[] = [
   { name: 'Односторонняя, 2 полосы', tags: { highway: 'secondary', lanes: '2', oneway: 'yes', maxspeed: '60' }, forDrawing: true },
   { name: 'Проезд / двор', tags: { highway: 'service', maxspeed: '20' }, forDrawing: true },
   { name: 'Мост', tags: { bridge: 'yes', layer: '1' }, forDrawing: false },
+  // пешеходные дороги
+  { name: 'Пешеходная дорожка', tags: { highway: 'footway' }, forDrawing: true, group: 'foot' },
+  { name: 'Пешеходная улица', tags: { highway: 'pedestrian' }, forDrawing: true, group: 'foot' },
+  { name: 'Лестница', tags: { highway: 'steps' }, forDrawing: true, group: 'foot' },
+  // «зебра» как дорожка поперёк проезжей части: SUMO строит по ней пешеходный переход (концы — на узлах дороги)
+  { name: 'Переход (дорожка через дорогу)', tags: { highway: 'footway', footway: 'crossing' }, forDrawing: true, group: 'foot' },
 ]
 
 export const DRAW_TEMPLATES = ROAD_TEMPLATES.filter((t) => t.forDrawing)
+
+/** Пешеходная ли дорога по шаблону (для автоматического показа пешеходных и включения в экспорт). */
+export const isFootTemplate = (t: RoadTemplate | undefined) => t?.group === 'foot'

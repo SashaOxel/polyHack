@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildGraph } from './graph'
 import { deleteNode, deleteWay, drawRoad, featureTags, insertNodeOnWay, mergeNodes, placeRoadFeature, splitAtNode } from './ops'
 import { serializeOsm } from './serialize'
+import { DRAW_TEMPLATES, isFootTemplate } from './templates'
 import { Store } from './store'
 import { emptyDocument, type Tags } from './types'
 
@@ -208,5 +209,41 @@ describe('светофоры и пешеходные переходы — это
     expect(featureTags({ highway: 'crossing' }, 'signal')).toEqual({ highway: 'traffic_signals', crossing: 'traffic_signals' })
     expect(featureTags({ highway: 'traffic_signals' }, 'crossing')).toEqual({ highway: 'traffic_signals', crossing: 'traffic_signals' })
     expect(featureTags({ name: 'x' }, 'signal')).toEqual({ name: 'x', highway: 'traffic_signals' })
+  })
+})
+
+describe('пешеходные дороги', () => {
+  const foot = (name: string) => DRAW_TEMPLATES.find((t) => t.name === name)!
+
+  it('в списке для рисования есть пешеходные шаблоны, и они помечены', () => {
+    const names = DRAW_TEMPLATES.filter(isFootTemplate).map((t) => t.name)
+    expect(names).toEqual(expect.arrayContaining(['Пешеходная дорожка', 'Лестница', 'Пешеходная улица']))
+    expect(isFootTemplate(foot('Жилая улица'))).toBe(false)
+  })
+
+  it('дорожка создаётся, присоединяется к дороге, но в граф для машин не попадает', () => {
+    const s = plus()
+    const edgesBefore = buildGraph(s.doc).edges.length
+    const id = drawRoad(s, [
+      { kind: 'way', wayId: 1, lat: 52.0, lon: 104.0005 }, // начало на проезжей части
+      { kind: 'new', lat: 52.0004, lon: 104.0005 },
+    ], foot('Пешеходная дорожка').tags)
+    expect(s.doc.ways.get(id)!.tags).toEqual({ highway: 'footway' })
+    // дорожка подключена к проезжей части, но для машин это не перекрёсток: граф не меняется
+    expect(buildGraph(s.doc).edges.length).toBe(edgesBefore)
+    expect(buildGraph(s.doc).edges.some((e) => e.wayId === id)).toBe(false)
+    expect(s.doc.ways.get(1)!.nodes).toHaveLength(4) // но узел в проезжей дороге появился — это точка подключения
+  })
+
+  it('в .osm попадает только с «Добавить пешеходные»', () => {
+    const s = plus()
+    const id = drawRoad(s, [{ kind: 'new', lat: 52.01, lon: 104.0 }, { kind: 'new', lat: 52.01, lon: 104.001 }], foot('Лестница').tags)
+    expect(serializeOsm(s.doc, { onlyRoads: true })).not.toContain(`<way id="${id}"`)
+    expect(serializeOsm(s.doc, { onlyRoads: true, includePedestrian: true })).toContain(`<way id="${id}"`)
+    expect(serializeOsm(s.doc)).toContain('v="steps"') // полный экспорт — всё
+  })
+
+  it('дорожка-переход несёт footway=crossing', () => {
+    expect(foot('Переход (дорожка через дорогу)').tags).toEqual({ highway: 'footway', footway: 'crossing' })
   })
 })

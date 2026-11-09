@@ -3,7 +3,7 @@ import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
-import { DRAW_TEMPLATES } from './core/templates'
+import { DRAW_TEMPLATES, isFootTemplate } from './core/templates'
 import { hasErrors, validate, type Issue } from './validate'
 import { applyAutoFixes, applyFix } from './validate/fixes'
 import { AttributePanel } from './ui/AttributePanel'
@@ -150,6 +150,16 @@ export function App() {
   }
   const ignoreOne = (i: Issue) => setIgnored(new Set(ignored).add(i.id))
 
+  // пешеходная дорога должна быть видна сразу и попасть в экспорт: включаем показ и «Добавить пешеходные»
+  const pickTemplate = (i: number) => {
+    setTplIdx(i)
+    if (isFootTemplate(DRAW_TEMPLATES[i])) {
+      setShowPed(true)
+      setWithPed(true)
+      setStatus('Пешеходные дороги включены в показ и в экспорт (меню «Вид» и «Экспорт»)')
+    }
+  }
+
   const errCount = useMemo(() => issues.filter((i) => i.severity === 'error').length, [issues])
   const loaded = store.doc.nodes.size > 0
 
@@ -241,10 +251,15 @@ export function App() {
           {mode === '2d' && tool === 'draw' && (
             <div className="tool-card">
               <b>Новая дорога</b>
-              <select value={tplIdx} onChange={(e) => setTplIdx(+e.target.value)} title="Тип новой дороги">
-                {DRAW_TEMPLATES.map((t, i) => <option key={t.name} value={i}>{t.name}</option>)}
+              <select value={tplIdx} onChange={(e) => pickTemplate(+e.target.value)} title="Тип новой дороги">
+                <optgroup label="Автомобильные">
+                  {DRAW_TEMPLATES.map((t, i) => (isFootTemplate(t) ? null : <option key={t.name} value={i}>{t.name}</option>))}
+                </optgroup>
+                <optgroup label="Пешеходные">
+                  {DRAW_TEMPLATES.map((t, i) => (isFootTemplate(t) ? <option key={t.name} value={i}>{t.name}</option> : null))}
+                </optgroup>
               </select>
-              <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена</span>
+              <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена{isFootTemplate(DRAW_TEMPLATES[tplIdx]) ? ' · пешеходная дорога попадёт в .osm при включённой галочке «Добавить пешеходные»' : ''}</span>
             </div>
           )}
           {mode === '2d' && (tool === 'signal' || tool === 'crossing') && (

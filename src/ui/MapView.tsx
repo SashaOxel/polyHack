@@ -173,7 +173,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       const st = roadStyle(way.tags.highway)
       const base = (st.width + ((Number(way.tags.lanes) || 1) - 1) * 0.8) * zoomK
       const li = laneInfo(way)
-      return li ? Math.max(base, li.total * laneW) : base
+      // пешеходная дорожка на крупном плане — реальные ~2 м, а не тонкая линия
+      return li ? Math.max(base, li.total * laneW) : Math.max(base, 1.8 * ppm)
     }
 
     ctx.lineCap = 'round'

@@ -7,7 +7,7 @@ import type { OsmWay, Tags } from '../core/types'
 import { ElevationEditor } from './ElevationEditor'
 
 const HIGHWAYS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'service',
-  'primary_link', 'secondary_link', 'living_street', 'footway']
+  'primary_link', 'secondary_link', 'living_street', 'footway', 'pedestrian', 'steps', 'path']
 
 /** Текст про ограничение скорости под полем ввода. */
 function describeSpeed(s: ReturnType<typeof speedLimit>, highway?: string): string {

@@ -57,6 +57,29 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
     expect(tls(s)).toBeGreaterThan(baseline)
   }, 120000)
 
+  it('нарисованные пешеходные дорожки и переход проходят через SUMO', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    const road = [...s.doc.ways.values()].find((x) => isDrivable(x) && x.nodes.length > 3 && x.tags.highway === 'residential')!
+    const a = s.doc.nodes.get(road.nodes[1])!, b = s.doc.nodes.get(road.nodes[2])!
+    const mid = { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }
+    // дорожка от проезжей части в сторону и дорожка-«зебра» через неё
+    const walk = drawRoad(s, [{ kind: 'way', wayId: road.id, ...mid }, { kind: 'new', lat: mid.lat + 0.0004, lon: mid.lon }], { highway: 'footway' })
+    const zebra = drawRoad(s, [
+      { kind: 'new', lat: mid.lat + 0.00005, lon: mid.lon - 0.00004 },
+      { kind: 'way', wayId: road.id, ...mid },
+      { kind: 'new', lat: mid.lat - 0.00005, lon: mid.lon + 0.00004 },
+    ], { highway: 'footway', footway: 'crossing' })
+
+    const dir = mkdtempSync(join(tmpdir(), 'uds-foot-'))
+    const osm = join(dir, 'foot.osm')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, includePedestrian: true, keepMeta: false }))
+    expect(readFileSync(osm, 'utf8')).toContain(`<way id="${walk}"`)
+    expect(readFileSync(osm, 'utf8')).toContain(`<way id="${zebra}"`)
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
+    expect(readFileSync(join(dir, 'out.net.xml'), 'utf8')).toContain('<edge ')
+  }, 120000)
+
   it('файл с высотами (тег ele) проходит через SUMO', () => {
     const s = new Store()
     s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
