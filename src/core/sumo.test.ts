@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { drawRoad, moveNode, reverseWay } from './ops'
+import { drawRoad, moveNode, reverseWay, setElevationRamp } from './ops'
 import { parseOsm } from './parse'
 import { isDrivable } from './roads'
 import { serializeOsm } from './serialize'
@@ -32,6 +32,19 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
 
     const net = readFileSync(join(dir, 'out.net.xml'), 'utf8')
     expect(net).toContain('<edge ')
+  }, 60000)
+
+  it('файл с высотами (тег ele) проходит через SUMO', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    const w = [...s.doc.ways.values()].find((x) => isDrivable(x) && x.nodes.length > 4)!
+    setElevationRamp(s, w.id, 100, 112)
+    const dir = mkdtempSync(join(tmpdir(), 'uds-ele-'))
+    const osm = join(dir, 'ele.osm')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+    expect(readFileSync(osm, 'utf8')).toContain('k="ele"')
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
+    expect(readFileSync(join(dir, 'out.net.xml'), 'utf8')).toContain('<edge ')
   }, 60000)
 
   it('нарисованная дорога с перекрёстком попадает в сеть SUMO', () => {

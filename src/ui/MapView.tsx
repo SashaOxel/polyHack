@@ -67,10 +67,11 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     return unproject(v.cx + (sx - w / 2) / v.scale, v.cy - (sy - h / 2) / v.scale)
   }
 
-  function fit() {
+  function fit(): boolean {
     const c = canvas.current
     const doc = store.doc
-    if (!c || doc.nodes.size === 0) return
+    if (!c || doc.nodes.size === 0) return false
+    if (c.getBoundingClientRect().width === 0) return false // карта скрыта (режим 3D)
     let b = doc.bounds
     if (!b) {
       let minlat = 90, minlon = 180, maxlat = -90, maxlon = -180
@@ -89,6 +90,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       scale: Math.min(r.width / (z.x - a.x), r.height / (z.y - a.y)) * 0.92,
     }
     fitScale.current = view.current.scale
+    return true
   }
 
   /** Масштаб кнопками ± вокруг центра карты. */
@@ -107,7 +109,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       barLabel.current.textContent = sb.label
     }
     const m = mini.current
-    m.update(store.doc, store.version, dpr)
+    m.update(store.doc, store.docVersion, dpr)
     // показываем миникарту, когда окно покрывает заметно меньше половины сети
     const zoomedIn = fitScale.current > 0 && v.scale > fitScale.current * 1.5
     if (miniBox.current) miniBox.current.style.display = zoomedIn && m.ready ? 'block' : 'none'
@@ -127,6 +129,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     if (!c) return
     const dpr = window.devicePixelRatio || 1
     const r = c.getBoundingClientRect()
+    if (r.width === 0 || r.height === 0) return
     if (c.width !== Math.round(r.width * dpr) || c.height !== Math.round(r.height * dpr)) {
       c.width = Math.round(r.width * dpr)
       c.height = Math.round(r.height * dpr)
@@ -499,7 +502,10 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     c.addEventListener('pointermove', onMove)
     c.addEventListener('pointerup', onUp)
     c.addEventListener('wheel', onWheel, { passive: false })
-    const ro = new ResizeObserver(redraw)
+    const ro = new ResizeObserver(() => {
+      if (fitPending.current && fit()) { fitPending.current = false; lastFile.current = store.fileName }
+      redraw()
+    })
     ro.observe(c)
     return () => {
       c.removeEventListener('pointerdown', onDown)
@@ -513,10 +519,11 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
 
   // новый файл → показать всю карту
   const lastFile = useRef('')
+  const fitPending = useRef(false)
   useEffect(() => {
     if (store.fileName !== lastFile.current && store.doc.nodes.size) {
-      lastFile.current = store.fileName
-      fit()
+      if (fit()) lastFile.current = store.fileName
+      else fitPending.current = true // карта сейчас скрыта (3D): подгоним, когда покажут
     }
     redraw()
     // eslint-disable-next-line react-hooks/exhaustive-deps

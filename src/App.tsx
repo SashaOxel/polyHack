@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
@@ -12,6 +12,9 @@ import { MapView, type Tool } from './ui/MapView'
 import { downloadText, pickOsmFile } from './ui/files'
 import { Icon } from './ui/icons'
 import { DEFAULT_TILE_URL } from './ui/tiles'
+
+// 3D грузится отдельным куском (three.js тяжёлый) — только когда откроют вкладку 3D
+const View3D = lazy(() => import('./ui/View3D'))
 
 export function App() {
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
@@ -29,6 +32,7 @@ export function App() {
   const [focus, setFocus] = useState<{ lat: number; lon: number; n: number } | null>(null)
   const [status, setStatus] = useState('Откройте файл .osm или загрузите пример')
   const [tool, setTool] = useState<Tool>('select')
+  const [mode, setMode] = useState<'2d' | '3d'>('2d')
   const [tplIdx, setTplIdx] = useState(2)
 
   const load = useCallback((text: string, name: string) => {
@@ -96,9 +100,11 @@ export function App() {
       else if (mod) return
       else if (e.key === 'Escape') store.select(null) // в режиме рисования Esc ещё и отменяет черновик (MapView)
       // выбор инструмента
+      else if (key === '2') setMode('2d')
+      else if (key === '3') { setMode('3d'); setTool('select') }
       else if (key === 'v') setTool('select')
-      else if (key === 'd') setTool('draw')
-      else if (key === 'n') setTool('node')
+      else if (key === 'd' && mode === '2d') setTool('draw')
+      else if (key === 'n' && mode === '2d') setTool('node')
       // действия над выбранным объектом (в режиме рисования Backspace убирает точку, а не удаляет)
       else if (sel?.kind === 'way' && key === 'r') reverseWay(store, sel.id)
       else if (sel?.kind === 'node' && key === 's') {
@@ -112,7 +118,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [save, open, tool])
+  }, [save, open, tool, mode])
 
   // меню «Вид» и «Экспорт» закрываются кликом вне их
   useEffect(() => {
@@ -175,6 +181,12 @@ export function App() {
           <button className="btn icon" onClick={() => store.redo()} disabled={!store.canRedo} title="Вернуть (Ctrl+Shift+Z)"><Icon name="redo" /></button>
         </div>
 
+        <div className="seg" role="tablist" aria-label="Режим просмотра">
+          <button role="tab" aria-selected={mode === '2d'} className={mode === '2d' ? 'active' : ''} onClick={() => setMode('2d')} title="2D (2)">2D</button>
+          <button role="tab" aria-selected={mode === '3d'} className={mode === '3d' ? 'active' : ''}
+            onClick={() => { setMode('3d'); setTool('select') }} title="3D (3)">3D</button>
+        </div>
+
         <span className="spacer" />
 
         <details className="menu">
@@ -201,21 +213,28 @@ export function App() {
 
       <main>
         <div className="stage">
-          <MapView
-            tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus}
-            tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
-          />
+          <div className="layer" style={{ display: mode === '2d' ? 'block' : 'none' }}>
+            <MapView
+              tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus}
+              tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+            />
+          </div>
+          {mode === '3d' && loaded && (
+            <Suspense fallback={<div className="loading3d">Загрузка 3D…</div>}>
+              <View3D showPedestrian={showPed} onHint={setStatus} />
+            </Suspense>
+          )}
 
-          <div className="palette">
+          {mode === '2d' && <div className="palette">
             {TOOLS.map((t) => (
               <button key={t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label} (${t.key})`}>
                 <Icon name={t.icon} size={20} />
                 <kbd>{t.key}</kbd>
               </button>
             ))}
-          </div>
+          </div>}
 
-          {tool === 'draw' && (
+          {mode === '2d' && tool === 'draw' && (
             <div className="tool-card">
               <b>Новая дорога</b>
               <select value={tplIdx} onChange={(e) => setTplIdx(+e.target.value)} title="Тип новой дороги">
@@ -224,7 +243,7 @@ export function App() {
               <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена</span>
             </div>
           )}
-          {tool === 'node' && (
+          {mode === '2d' && tool === 'node' && (
             <div className="tool-card"><b>Узел на дороге</b><span>Кликните по дороге, чтобы поставить на неё узел</span></div>
           )}
 
@@ -263,7 +282,7 @@ export function App() {
 
       <footer>
         <span className="status">{status}{store.dirty && <em> · есть несохранённые изменения</em>}</span>
-        <span className="keys">V выбрать · D дорога · N узел · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
+        <span className="keys">2/3 режим · V выбрать · D дорога · N узел · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
       </footer>
     </div>
   )

@@ -1,3 +1,4 @@
+import { cumulativeDistance } from './elevation'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
 import type { OsmDocument, OsmRelation, OsmWay, Tags } from './types'
@@ -87,6 +88,41 @@ export function reverseWay(store: Store, id: number) {
       else if (k.endsWith(':backward')) { tags[k.replace(':backward', ':forward')] = tags[k]; delete tags[k] }
     }
     tx.setWay({ ...w, nodes: [...w.nodes].reverse(), tags })
+  })
+}
+
+/**
+ * Плавный переход по Z: высоты узлов дороги линейно (по расстоянию) от `from` до `to`, метры.
+ * Пишется в тег `ele` каждого узла — стандартный способ хранить высоту в OSM.
+ */
+export function setElevationRamp(store: Store, wayId: number, from: number, to: number) {
+  const way = store.doc.ways.get(wayId)
+  if (!way || !Number.isFinite(from) || !Number.isFinite(to)) return
+  const d = cumulativeDistance(store.doc, way)
+  const total = d[d.length - 1]
+  store.commit('Плавный переход высоты', (tx) => {
+    way.nodes.forEach((id, i) => {
+      const n = store.doc.nodes.get(id)
+      if (!n) return
+      const t = total > 0 ? d[i] / total : way.nodes.length > 1 ? i / (way.nodes.length - 1) : 0
+      const z = Math.round((from + (to - from) * t) * 10) / 10
+      tx.setNode({ ...n, tags: { ...n.tags, ele: String(z) } })
+    })
+  })
+}
+
+/** Убрать высоты (`ele`) у всех узлов дороги. */
+export function clearElevation(store: Store, wayId: number) {
+  const way = store.doc.ways.get(wayId)
+  if (!way) return
+  store.commit('Сбросить высоту', (tx) => {
+    for (const id of new Set(way.nodes)) {
+      const n = store.doc.nodes.get(id)
+      if (!n || n.tags.ele === undefined) continue
+      const tags = { ...n.tags }
+      delete tags.ele
+      tx.setNode({ ...n, tags })
+    }
   })
 }
 

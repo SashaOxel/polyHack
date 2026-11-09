@@ -66,6 +66,8 @@ export class Store {
   doc: OsmDocument = emptyDocument()
   /** Растёт при любом изменении — по нему React/Canvas понимают, что надо перерисоваться. */
   version = 0
+  /** Растёт только при изменении документа (загрузка, правка, undo/redo), но не при выборе объекта. */
+  docVersion = 0
   selection: ElementRef | null = null
   fileName = 'untitled.osm'
   dirty = false
@@ -94,6 +96,7 @@ export class Store {
     this.selection = null
     this.dirty = false
     this.idCounter = 0
+    this.docVersion++
     this.emit()
   }
 
@@ -109,6 +112,7 @@ export class Store {
     this.undoStack.push({ label, changes: tx.changes })
     this.redoStack = []
     this.dirty = true
+    this.docVersion++
     this.emit()
   }
 
@@ -138,6 +142,7 @@ export class Store {
     this.apply(e.changes, 'undo')
     this.redoStack.push(e)
     this.dirty = true
+    this.docVersion++
     this.emit()
   }
 
@@ -147,6 +152,7 @@ export class Store {
     this.apply(e.changes, 'redo')
     this.undoStack.push(e)
     this.dirty = true
+    this.docVersion++
     this.emit()
   }
 

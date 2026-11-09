@@ -3,6 +3,7 @@ import { deleteNode, deleteWay, reverseWay, setTags, splitAtNode } from '../core
 import { store } from '../core/store'
 import { ROAD_TEMPLATES } from '../core/templates'
 import type { Tags } from '../core/types'
+import { ElevationEditor } from './ElevationEditor'
 
 const HIGHWAYS = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'service',
   'primary_link', 'secondary_link', 'living_street', 'footway']
@@ -59,6 +60,7 @@ export function AttributePanel() {
           <div className="row wrap">
             {ROAD_TEMPLATES.map((t) => <button key={t.name} onClick={() => patch(t.tags)}>{t.name}</button>)}
           </div>
+          <ElevationEditor wayId={sel.id} />
         </>
       )}
 
