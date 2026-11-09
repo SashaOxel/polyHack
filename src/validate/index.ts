@@ -1,0 +1,170 @@
+import { distanceM } from '../core/geo'
+import { analyze, buildGraph, waysOfGroup, type RoadGraph } from '../core/graph'
+import { isDrivable } from '../core/roads'
+import type { OsmDocument } from '../core/types'
+
+/**
+ * ВАЛИДАТОР. Принимает документ, возвращает список проблем.
+ * Чтобы добавить проверку — напишите функцию (doc) => Issue[] и добавьте её в CHECKS.
+ */
+
+export type Severity = 'error' | 'warning'
+
+export interface Issue {
+  /** уникальный ключ проблемы */
+  id: string
+  severity: Severity
+  /** код для группировки и фильтров */
+  code: string
+  message: string
+  nodeIds?: number[]
+  wayIds?: number[]
+  /** точка для подсветки на карте и перехода к проблеме */
+  at?: { lat: number; lon: number }
+}
+
+/** Проверка получает документ и готовый транспортный граф (строится один раз на validate). */
+type Check = (doc: OsmDocument, graph: RoadGraph) => Issue[]
+
+/** way ссылается на узел, которого нет в файле (обрезка по рамке). */
+const missingNodes: Check = (doc) => {
+  const out: Issue[] = []
+  for (const w of doc.ways.values()) {
+    const missing = w.nodes.filter((n) => !doc.nodes.has(n))
+    if (missing.length) {
+      const first = w.nodes.map((n) => doc.nodes.get(n)).find(Boolean)
+      out.push({
+        id: `missing-nodes:${w.id}`, severity: 'error', code: 'missing-nodes', wayIds: [w.id],
+        message: `Дорога ${w.id} ссылается на ${missing.length} несуществующих узлов`,
+        at: first ? { lat: first.lat, lon: first.lon } : undefined,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * Запрет поворота ссылается на объекты, которых нет в файле (SUMO: «unknown from-way»).
+ * Маршруты общественного транспорта и поездов не проверяем: они обрезаются по рамке всегда,
+ * к дорогам не относятся и при экспорте «только дороги» отбрасываются.
+ */
+const brokenRelations: Check = (doc) => {
+  const out: Issue[] = []
+  for (const r of doc.relations.values()) {
+    if (r.tags.type !== 'restriction') continue
+    const bad = r.members.filter((m) =>
+      m.type === 'way' ? !doc.ways.has(m.ref) : m.type === 'node' ? !doc.nodes.has(m.ref) : !doc.relations.has(m.ref),
+    )
+    if (!bad.length) continue
+    const node = r.members.filter((m) => m.type === 'node').map((m) => doc.nodes.get(m.ref)).find(Boolean)
+    out.push({
+      id: `broken-relation:${r.id}`, severity: 'error', code: 'broken-relation',
+      message: `Запрет поворота ${r.id}${r.tags.restriction ? ' (' + r.tags.restriction + ')' : ''}: нет ${bad.length} из ${r.members.length} участников`,
+      at: node ? { lat: node.lat, lon: node.lon } : undefined,
+    })
+  }
+  return out
+}
+
+/** Два разных узла почти в одной точке: «склеенный» перекрёсток или дубль. */
+const duplicateNodes: Check = (doc) => {
+  const out: Issue[] = []
+  const used = new Set<number>()
+  for (const w of doc.ways.values()) if (isDrivable(w)) for (const n of w.nodes) used.add(n)
+  const cell = 0.00001 // ≈ 1 м
+  const grid = new Map<string, number[]>()
+  for (const id of used) {
+    const n = doc.nodes.get(id)
+    if (!n) continue
+    const key = `${Math.round(n.lat / cell)}:${Math.round(n.lon / cell)}`
+    ;(grid.get(key) ?? grid.set(key, []).get(key)!).push(id)
+  }
+  for (const ids of grid.values()) {
+    if (ids.length < 2) continue
+    const a = doc.nodes.get(ids[0])!
+    const b = doc.nodes.get(ids[1])!
+    if (distanceM(a.lat, a.lon, b.lat, b.lon) < 1) {
+      out.push({
+        id: `dup-nodes:${ids.join(',')}`, severity: 'warning', code: 'duplicate-nodes', nodeIds: ids,
+        message: `Узлы ${ids.join(', ')} находятся в одной точке (<1 м) — возможно, перекрёсток не склеен`,
+        at: { lat: a.lat, lon: a.lon },
+      })
+    }
+  }
+  return out
+}
+
+/** Изолированные группы дорог для машин: не связаны с основной сетью. */
+const isolatedComponents: Check = (doc) => {
+  // union-find по узлам проезжих дорог
+  const parent = new Map<number, number>()
+  const find = (x: number): number => {
+    let r = x
+    while (parent.get(r) !== r) r = parent.get(r)!
+    while (parent.get(x) !== r) { const nx = parent.get(x)!; parent.set(x, r); x = nx }
+    return r
+  }
+  const wayOfRoot = new Map<number, number[]>()
+  const drivable = [...doc.ways.values()].filter(isDrivable)
+  for (const w of drivable) for (const n of w.nodes) if (!parent.has(n)) parent.set(n, n)
+  for (const w of drivable) for (let i = 1; i < w.nodes.length; i++) parent.set(find(w.nodes[i]), find(w.nodes[0]))
+  for (const w of drivable) {
+    const r = find(w.nodes[0])
+    ;(wayOfRoot.get(r) ?? wayOfRoot.set(r, []).get(r)!).push(w.id)
+  }
+  const groups = [...wayOfRoot.values()].sort((a, b) => b.length - a.length)
+  if (groups.length < 2) return []
+  const out: Issue[] = []
+  // самая большая группа считается основной сетью, остальные — изолированные
+  for (const wayIds of groups.slice(1)) {
+    const w = doc.ways.get(wayIds[0])!
+    const n = doc.nodes.get(w.nodes[0])
+    out.push({
+      id: `isolated:${wayIds[0]}`, severity: 'warning', code: 'isolated',
+      message: `Изолированный участок из ${wayIds.length} дорог (первая: ${wayIds[0]}) не связан с основной сетью`,
+      wayIds, at: n ? { lat: n.lat, lon: n.lon } : undefined,
+    })
+  }
+  return out
+}
+
+/**
+ * Связность с учётом направлений (по транспортному графу):
+ *  - ловушка: из основной сети въехать можно, выехать нельзя;
+ *  - нет въезда: из этого участка можно выехать в сеть, попасть на него нельзя.
+ * Для краёв карты (обрезка по рамке) это нормально, поэтому только предупреждение.
+ */
+const directedConnectivity: Check = (doc, g) => {
+  const a = analyze(g)
+  const out: Issue[] = []
+  const emit = (groups: number[][], code: string, severity: Severity, text: (n: number) => string) => {
+    for (const grp of groups) {
+      const first = g.nodes.get(grp[0])!
+      const wayIds = waysOfGroup(g, grp)
+      out.push({
+        id: `${code}:${grp[0]}`, severity, code, nodeIds: grp.slice(0, 20), wayIds,
+        message: text(grp.length) + (wayIds[0] ? ` (дорога ${wayIds[0]})` : ''),
+        at: { lat: first.lat, lon: first.lon },
+      })
+    }
+  }
+  emit(a.traps, 'trap', 'warning', (n) => `Ловушка: ${n} уз. — въехать можно, выехать нельзя (проверьте oneway)`)
+  emit(a.noEntry, 'no-entry', 'warning', (n) => `Нет въезда: ${n} уз. — выехать можно, попасть сюда нельзя (проверьте oneway)`)
+  return out
+}
+
+/**
+ * TODO(валидатор): добавить проверки
+ *  - пересечения дорог без общего узла (разорванные перекрёстки), кроме мостов (bridge/layer);
+ *  - светофор не на перекрёстке; lanes vs turn:lanes; направление кольца;
+ *  - way из одного узла или с повторяющимися подряд узлами.
+ */
+const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity]
+
+export function validate(doc: OsmDocument): Issue[] {
+  const graph = buildGraph(doc)
+  return CHECKS.flatMap((c) => c(doc, graph))
+}
+
+/** Есть ли блокирующие ошибки (для проверки перед сохранением). */
+export const hasErrors = (issues: Issue[]) => issues.some((i) => i.severity === 'error')

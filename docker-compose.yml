@@ -1,0 +1,5 @@
+services:
+  editor:
+    build: .
+    ports:
+      - "8080:80"
