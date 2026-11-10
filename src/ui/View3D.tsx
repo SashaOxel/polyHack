@@ -13,6 +13,11 @@ interface Props {
   showTram?: boolean
   showLanes?: boolean
   theme?: Theme
+  /** ночной режим и облёт управляются снаружи (кнопки здесь, режим презентации, командная палитра) */
+  night: boolean
+  setNight: (on: boolean) => void
+  flying: boolean
+  setFlying: (on: boolean) => void
   onHint: (msg: string) => void
 }
 
@@ -23,15 +28,13 @@ const MAX_CARS = 1000
  * Вращение — левая кнопка, сдвиг — правая, масштаб — колесо. Клик по дороге выбирает её (как в 2D),
  * так что теги можно править в боковой панели и сразу видеть результат.
  */
-export default function View3D({ showPedestrian, showTram = true, showLanes = true, theme = 'light', onHint }: Props) {
+export default function View3D({ showPedestrian, showTram = true, showLanes = true, night, setNight, flying, setFlying, onHint }: Props) {
   // выбор объекта меняет version, правка документа — docVersion
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
   const host = useRef<HTMLDivElement>(null)
   const [zScale, setZScale] = useState(3)
   const [buildings, setBuildings] = useState(true)
   const [stats, setStats] = useState<SceneData['stats'] | null>(null)
-  const [night, setNight] = useState(theme === 'dark')
-  const [flying, setFlying] = useState(false)
 
   const gl = useRef<{
     renderer: THREE.WebGLRenderer
@@ -74,7 +77,14 @@ export default function View3D({ showPedestrian, showTram = true, showLanes = tr
     controls.maxPolarAngle = Math.PI / 2 - 0.04
     controls.screenSpacePanning = false
 
-    const render = () => renderer.render(scene, camera)
+    // ближняя плоскость растёт с расстоянием до цели: иначе у далёких дорог не хватает точности буфера глубины
+    // (земля, дорога и разметка лежат в пределах десятков сантиметров) и всё мерцает
+    const render = () => {
+      const d = camera.position.distanceTo(controls.target)
+      const near = Math.min(Math.max(0.5, d * 0.03), 400)
+      if (Math.abs(near - camera.near) > camera.near * 0.05) { camera.near = near; camera.updateProjectionMatrix() }
+      renderer.render(scene, camera)
+    }
     controls.addEventListener('change', render)
 
     const resize = () => {

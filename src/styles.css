@@ -411,3 +411,47 @@ details.from-file > summary { cursor: pointer; list-style: revert; }
 .row label.narrow { flex: 0 0 96px; }
 .tool-card .seg button { padding: 3px 9px; font-size: 12px; }
 .panel-body .seg button { padding: 4px 9px; font-size: 12px; }
+
+.heat-legend { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
+.heat-legend i { display: inline-block; width: 60px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #22c55e, #eab308, #f97316, #dc2626); }
+@media (max-width: 1280px) { .heat-legend span { display: none; } }
+
+/* ---------- командная палитра ---------- */
+.palette-overlay { position: fixed; inset: 0; z-index: 100; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh;
+  background: rgba(2, 6, 23, 0.45); backdrop-filter: blur(3px); animation: fade .12s ease-out; }
+.cmdk { width: min(640px, calc(100vw - 32px)); max-height: 66vh; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 24px 64px rgba(0,0,0,.45), var(--glow);
+  animation: pop .14s ease-out; }
+.cmdk input { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 16px 18px; font-size: 16px; background: transparent; }
+.cmdk input:focus { outline: none; }
+.cmdk-list { overflow: auto; padding: 6px; }
+.cmdk-group { padding: 8px 10px 4px; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.cmdk-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--text); }
+.cmdk-item.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.cmdk-item .ic { width: 22px; text-align: center; flex: none; }
+.cmdk-item .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 13px; }
+.cmdk-item small { color: var(--muted); font-size: 11px; }
+.cmdk-item kbd, .cmdk-foot kbd { font: 600 10px ui-monospace, monospace; padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); }
+.cmdk-empty { padding: 16px; color: var(--muted); text-align: center; }
+.cmdk-foot { display: flex; gap: 6px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.cmdk-btn { color: var(--muted); }
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes pop { from { opacity: 0; transform: translateY(-8px) scale(.98) } to { opacity: 1; transform: none } }
+
+/* ---------- режим презентации ---------- */
+.present-btn { font-weight: 700; }
+:root[data-theme="dark"] .present-btn { border-color: #f59e0b; color: #fbbf24; }
+.app.presenting header, .app.presenting aside, .app.presenting footer,
+.presenting .palette, .presenting .tool-card, .presenting .traffic-panel, .presenting .layers,
+.presenting .v3-panel, .presenting .v3-help, .presenting .zoom-ctl, .presenting .map-hud { display: none !important; }
+.present-overlay { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+.present-title { position: absolute; left: 32px; bottom: 32px; display: flex; flex-direction: column; gap: 4px; color: #e2e8f0;
+  text-shadow: 0 2px 16px rgba(0,0,0,.7); animation: fade 1.2s ease-out; }
+.present-title b { font-size: 34px; letter-spacing: .02em; background: linear-gradient(90deg, #7dd3fc, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.present-title span { font-size: 15px; opacity: .85; }
+.present-exit { position: absolute; right: 20px; top: 16px; pointer-events: auto; opacity: .35; background: rgba(15,23,42,.6); color: #e2e8f0; border-color: #334155; }
+.present-exit:hover { opacity: 1; }
+
+.attribution { position: fixed; right: 8px; bottom: 4px; z-index: 5; font-size: 10px; color: var(--muted); opacity: .8; pointer-events: none;
+  padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 70%, transparent); }
+.presenting .attribution { display: none; }

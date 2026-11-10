@@ -251,7 +251,34 @@ export class TrafficSim {
       }
     }
     this.t += dt
+    this.updateLoad(dt)
   }
+
+  /**
+   * Загруженность дорог: средняя скорость машин на дороге относительно её ограничения (0 — стоят, 1 — свободно),
+   * сглаженная по времени (постоянная ~20 с), чтобы цвет не мигал от каждого светофора.
+   */
+  private load = new Map<number, number>()
+  private updateLoad(dt: number) {
+    const acc = new Map<number, { s: number; n: number }>()
+    for (const v of this.vehicles) {
+      const way = this.edges[v.edge].wayId
+      const a = acc.get(way) ?? { s: 0, n: 0 }
+      a.s += Math.min(1, v.v / (this.geom[v.edge].vmax * v.pace))
+      a.n++
+      acc.set(way, a)
+    }
+    const alpha = 1 - Math.exp(-dt / 20)
+    for (const [way, a] of acc) {
+      const avg = a.s / a.n
+      const prev = this.load.get(way)
+      this.load.set(way, prev === undefined ? avg : prev + (avg - prev) * alpha)
+    }
+  }
+
+  /** Загруженность дороги (0 — пробка, 1 — свободно); undefined — машины по ней ещё не ездили. */
+  wayLoad(wayId: number): number | undefined { return this.load.get(wayId) }
+  loads(): IterableIterator<[number, number]> { return this.load.entries() }
 
   /** Тупик: разворот, если он есть, иначе машина появляется в случайном месте сети. */
   private uturnOrRespawn(v: Vehicle): number {

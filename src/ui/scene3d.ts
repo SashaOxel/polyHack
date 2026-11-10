@@ -192,7 +192,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
 
   const night = !!opts.night
   const roads = roadBuf.idx.length
-    ? new THREE.Mesh(toGeometry(roadBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }))
+    ? new THREE.Mesh(toGeometry(roadBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }))
     : null
   if (roads) { roads.receiveShadow = true; root.add(roads) }
   // ---- трамвайные пути: балласт и два рельса (колея 1524 мм) поверх улицы ----
@@ -215,8 +215,8 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
   if (markBuf.idx.length) {
     // ночью разметка светится (не зависит от освещения)
     root.add(new THREE.Mesh(toGeometry(markBuf), night
-      ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
-      : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
+      ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 })
+      : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 })))
   }
   if (slabBuf.idx.length) {
     root.add(new THREE.Mesh(toGeometry(slabBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
@@ -341,7 +341,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
   }
 
   // ---- земля и свет ----
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(radius * 8, radius * 8), new THREE.MeshLambertMaterial({ color: night ? '#101a2e' : '#e4e2d8' }))
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(radius * 8, radius * 8), new THREE.MeshLambertMaterial({ color: night ? '#101a2e' : '#e4e2d8', polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }))
   ground.rotation.x = -Math.PI / 2
   ground.position.y = -0.15
   ground.receiveShadow = true

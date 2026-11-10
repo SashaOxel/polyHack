@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
@@ -12,13 +12,16 @@ import { IssuesPanel } from './ui/IssuesPanel'
 import { MapView, type Tool } from './ui/MapView'
 import { downloadText, pickOsmFile } from './ui/files'
 import { Icon } from './ui/icons'
-import { DEFAULT_TILE_URL } from './ui/tiles'
+import { BASEMAPS, DEFAULT_TILE_URL } from './ui/tiles'
 import { DEFAULT_LAYERS, LAYER_LIST, type Layers } from './ui/layers'
 import { loadTheme, saveTheme, type Theme } from './ui/theme'
 import { TrafficPanel } from './ui/TrafficPanel'
 import { Dashboard } from './ui/Dashboard'
 import { RoutesPanel } from './ui/RoutesPanel'
 import { routeUi } from './ui/routeUi'
+import { CommandPalette, type Command } from './ui/CommandPalette'
+import { traffic } from './ui/trafficController'
+import type { SearchHit } from './core/search'
 
 // 3D грузится отдельным куском (three.js тяжёлый) — только когда откроют вкладку 3D
 const View3D = lazy(() => import('./ui/View3D'))
@@ -41,10 +44,17 @@ export function App() {
   const [ignored, setIgnored] = useState<Set<string>>(new Set())
   // скрытые пользователем проблемы не показываем и не считаем при сохранении
   const issues = useMemo(() => allIssues.filter((i) => !ignored.has(i.id)), [allIssues, ignored])
-  const [focus, setFocus] = useState<{ lat: number; lon: number; n: number } | null>(null)
+  const [focus, setFocus] = useState<{ lat: number; lon: number; n: number; scale?: number } | null>(null)
   const [status, setStatus] = useState('Откройте файл .osm или загрузите пример')
   const [tool, setTool] = useState<Tool>('select')
   const [mode, setMode] = useState<'2d' | '3d'>('2d')
+  // 3D: ночь и облёт — здесь, чтобы ими управляли режим презентации и командная палитра
+  const [night3d, setNight3d] = useState(() => loadTheme() === 'dark')
+  const [flying3d, setFlying3d] = useState(false)
+  const [presenting, setPresenting] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const beforePresent = useRef<'2d' | '3d'>('2d')
+  useSyncExternalStore(traffic.subscribe, traffic.getVersion)
   const [tplIdx, setTplIdx] = useState(2)
   // уровень новой дороги (на земле / мост / тоннель) и тип новой парковки
   const [drawLevel, setDrawLevel] = useState<'ground' | 'bridge' | 'tunnel'>('ground')
@@ -116,7 +126,9 @@ export function App() {
       else if (mod && key === 'y') { e.preventDefault(); store.redo() }
       else if (mod && key === 's') { e.preventDefault(); save() }
       else if (mod && key === 'o') { e.preventDefault(); open() }
+      else if (mod && key === 'k') { e.preventDefault(); setPaletteOpen(true) }
       else if (mod) return
+      else if (e.key === 'Escape' && presenting) stopPresentation()
       else if (e.key === 'Escape') { if (routeUi.picking) routeUi.setPicking(false); else store.select(null) } // в режиме рисования Esc ещё и отменяет черновик (MapView)
       // выбор инструмента
       else if (key === '2') setMode('2d')
@@ -141,7 +153,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [save, open, tool, mode])
+  }, [save, open, tool, mode, presenting])
 
   // меню «Вид» и «Экспорт» закрываются кликом вне их
   useEffect(() => {
@@ -185,6 +197,70 @@ export function App() {
   const errCount = useMemo(() => issues.filter((i) => i.severity === 'error').length, [issues])
   const loaded = store.doc.nodes.size > 0
 
+  // ---------- режим презентации ----------
+  function startPresentation() {
+    if (!store.doc.nodes.size) return
+    beforePresent.current = mode
+    setMode('3d'); setTool('select'); setNight3d(true)
+    if (!traffic.running) traffic.start()
+    setFlying3d(true)
+    setPresenting(true)
+    document.documentElement.requestFullscreen?.().catch(() => { /* полноэкранный режим не разрешён — работаем в окне */ })
+  }
+  function stopPresentation() {
+    setPresenting(false)
+    setFlying3d(false)
+    setMode(beforePresent.current)
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  }
+  // вышли из полноэкранного режима сами (Esc браузера) — выходим и из презентации
+  useEffect(() => {
+    const onFs = () => { if (!document.fullscreenElement && presenting) stopPresentation() }
+    document.addEventListener('fullscreenchange', onFs)
+    return () => document.removeEventListener('fullscreenchange', onFs)
+  }) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------- командная палитра ----------
+  const goTo = (hit: SearchHit) => {
+    setMode('2d')
+    setFocus({ lat: hit.lat, lon: hit.lon, n: Date.now(), scale: hit.kind === 'node' ? 5 : hit.kind === 'route' ? 1.2 : 2.2 })
+    if (hit.routeId !== undefined) { routeUi.select(hit.routeId); setTab('routes') }
+    else if (hit.ref) { store.select(hit.ref); setTab('attrs') }
+    setStatus(`Найдено: ${hit.label}`)
+  }
+  const tool2d = (t: Tool) => () => { setMode('2d'); setTool(t) }
+  const commands: Command[] = [
+    { id: 'present', label: 'Режим презентации', icon: '▶', keywords: 'презентация показ демо presentation', run: startPresentation },
+    { id: 'sim', label: traffic.running ? 'Пауза движения' : 'Запустить движение машин', icon: traffic.running ? '⏸' : '🚗', keywords: 'движение машины трафик симуляция traffic', run: () => (traffic.running ? traffic.pause() : traffic.start()) },
+    { id: 'sim-stop', label: 'Убрать машины', icon: '■', keywords: 'движение стоп машины', run: () => traffic.stop() },
+    { id: 'heat', label: layers.heat ? 'Скрыть загруженность' : 'Показать загруженность (пробки)', icon: '🌡', keywords: 'пробки загруженность тепловая heat', run: () => setLayer('heat', !layers.heat) },
+    { id: '3d', label: 'Перейти в 3D', hint: '3', icon: '🧊', keywords: '3d три объём', run: () => { setMode('3d'); setTool('select') } },
+    { id: '2d', label: 'Перейти в 2D', hint: '2', icon: '🗺', keywords: '2d карта план', run: () => setMode('2d') },
+    { id: 'night', label: 'Ночь в 3D', icon: '☾', keywords: 'ночь night темно фонари', run: () => { setMode('3d'); setNight3d(true) } },
+    { id: 'day', label: 'День в 3D', icon: '☀', keywords: 'день day светло', run: () => { setMode('3d'); setNight3d(false) } },
+    { id: 'fly', label: 'Облёт камеры (3D)', icon: '🎥', keywords: 'облёт облет камера полёт fly', run: () => { setMode('3d'); setFlying3d(true) } },
+    { id: 'sat', label: 'Подложка: спутник', icon: '🛰', keywords: 'спутник снимки подложка satellite', run: () => { setMode('2d'); setTileUrl(BASEMAPS[1].url); setLayer('tiles', true) } },
+    { id: 'scheme', label: 'Подложка: схема OpenStreetMap', icon: '🗺', keywords: 'схема подложка osm', run: () => { setMode('2d'); setTileUrl(BASEMAPS[0].url); setLayer('tiles', true) } },
+    { id: 'theme', label: theme === 'dark' ? 'Светлая тема' : 'Тёмная тема', icon: theme === 'dark' ? '☀' : '☾', keywords: 'тема оформление theme', run: () => setTheme(theme === 'dark' ? 'light' : 'dark') },
+    { id: 't-select', label: 'Инструмент: выбор', hint: 'V', icon: '↖', keywords: 'выбрать select', run: tool2d('select') },
+    { id: 't-draw', label: 'Инструмент: нарисовать дорогу', hint: 'D', icon: '✎', keywords: 'дорога улица рисовать мост тоннель трамвай пешеходная', run: tool2d('draw') },
+    { id: 't-node', label: 'Инструмент: узел на дороге', hint: 'N', icon: '•', keywords: 'узел node', run: tool2d('node') },
+    { id: 't-signal', label: 'Инструмент: светофор', hint: 'T', icon: '🚦', keywords: 'светофор signal', run: tool2d('signal') },
+    { id: 't-crossing', label: 'Инструмент: пешеходный переход', hint: 'C', icon: '🚸', keywords: 'переход зебра crossing', run: tool2d('crossing') },
+    { id: 't-stop', label: 'Инструмент: автобусная остановка', hint: 'B', icon: '🚏', keywords: 'остановка stop', run: tool2d('stop') },
+    { id: 't-parking', label: 'Инструмент: парковка', hint: 'P', icon: '🅿', keywords: 'парковка стоянка parking', run: tool2d('parking') },
+    { id: 'routes', label: 'Маршруты общественного транспорта', icon: '🚌', keywords: 'маршрут автобус трамвай routes', run: () => setTab('routes') },
+    { id: 'overview', label: 'Обзор сети', icon: '📊', keywords: 'обзор дашборд статистика', run: () => setTab('overview') },
+    { id: 'issues', label: 'Проблемы', icon: '⚠', keywords: 'проблемы ошибки валидатор', run: () => setTab('issues') },
+    { id: 'fix', label: 'Исправить автоматически', icon: '🛠', keywords: 'исправить ошибки автоисправление', run: () => { fixAll(); setTab('issues') } },
+    { id: 'save', label: 'Сохранить .osm', hint: 'Ctrl+S', icon: '💾', keywords: 'сохранить экспорт save', run: save },
+    { id: 'open', label: 'Открыть файл', hint: 'Ctrl+O', icon: '📂', keywords: 'открыть open', run: open },
+    { id: 'example', label: 'Загрузить пример', icon: '📍', keywords: 'пример example', run: loadExample },
+    { id: 'undo', label: 'Отменить', hint: 'Ctrl+Z', icon: '↶', keywords: 'отмена undo', run: () => store.undo() },
+    { id: 'redo', label: 'Вернуть', hint: 'Ctrl+Shift+Z', icon: '↷', keywords: 'вернуть redo', run: () => store.redo() },
+    ...LAYER_LIST.map((l) => ({ id: `layer-${l.key}`, label: `Слой «${l.label}»: ${layers[l.key] ? 'скрыть' : 'показать'}`, icon: '◫', keywords: 'слой', run: () => setLayer(l.key, !layers[l.key]) })),
+  ]
+
   const TOOLS: { id: Tool; icon: string; label: string; short: string; key: string }[] = [
     { id: 'select', icon: 'select', label: 'Выбрать и двигать', short: 'Выбор', key: 'V' },
     { id: 'draw', icon: 'road', label: 'Нарисовать дорогу, дорожку или трамвайные пути', short: 'Дорога', key: 'D' },
@@ -197,7 +273,7 @@ export function App() {
 
   return (
     <div
-      className="app"
+      className={presenting ? 'app presenting' : 'app'}
       onDragOver={(e) => e.preventDefault()}
       onDrop={async (e) => {
         e.preventDefault()
@@ -227,6 +303,9 @@ export function App() {
 
         <button className={tab === 'routes' ? 'btn routes-btn on' : 'btn routes-btn'} onClick={() => setTab('routes')}
           title="Маршруты автобусов и трамваев">🚌 Маршруты</button>
+        <button className="btn present-btn" onClick={startPresentation} disabled={!loaded}
+          title="Ночное 3D, движение машин и облёт камеры — для начала выступления (Esc — выйти)">▶ Презентация</button>
+        <button className="btn ghost cmdk-btn" onClick={() => setPaletteOpen(true)} title="Командная палитра">⌘K Поиск</button>
 
         <span className="spacer" />
 
@@ -239,6 +318,14 @@ export function App() {
           <summary><Icon name="layers" /> Вид <Icon name="chevron" size={14} /></summary>
           <div className="popover">
             <div className="field"><span>Какие объекты показывать — кнопка «Слои» на карте справа внизу</span></div>
+            <div className="field">
+              <span>Подложка</span>
+              <select value={BASEMAPS.find((b) => b.url === tileUrl)?.id ?? 'custom'}
+                onChange={(e) => { const b = BASEMAPS.find((x) => x.id === e.target.value); if (b) { setTileUrl(b.url); setLayer('tiles', true) } }}>
+                {BASEMAPS.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                <option value="custom">Свой адрес…</option>
+              </select>
+            </div>
             <div className="field">
               <span>Адрес тайлов {'{z}/{x}/{y}'}</span>
               <input value={tileUrl} onChange={(e) => setTileUrl(e.target.value)} />
@@ -267,11 +354,21 @@ export function App() {
           </div>
           {mode === '3d' && loaded && (
             <Suspense fallback={<div className="loading3d">Загрузка 3D…</div>}>
-              <View3D showPedestrian={showPed} showTram={layers.tram} showLanes={layers.lanes} theme={theme} onHint={setStatus} />
+              <View3D showPedestrian={showPed} showTram={layers.tram} showLanes={layers.lanes} theme={theme} onHint={setStatus}
+                night={night3d} setNight={setNight3d} flying={flying3d} setFlying={setFlying3d} />
             </Suspense>
           )}
 
           <TrafficPanel />
+          {presenting && (
+            <div className="present-overlay">
+              <div className="present-title">
+                <b>Редактор УДС</b>
+                <span>{store.fileName.replace(/\.osm$/i, '')} · {traffic.sim ? `${traffic.sim.stats().count} машин · ${Math.round(traffic.sim.stats().avgKmh)} км/ч` : ''}</span>
+              </div>
+              <button className="present-exit" onClick={stopPresentation}>Выйти · Esc</button>
+            </div>
+          )}
 
           {mode === '2d' && <div className="palette">
             {TOOLS.map((t) => (
@@ -394,6 +491,8 @@ export function App() {
         <span className="status">{status}{store.dirty && <em> · есть несохранённые изменения</em>}</span>
         <span className="keys">2/3 режим · V выбрать · D дорога · N узел · T светофор · C переход · S разрезать · R развернуть · Del удалить · Ctrl+Z · Ctrl+S</span>
       </footer>
+      {layers.tiles && BASEMAPS.find((b) => b.url === tileUrl) && <div className="attribution">{BASEMAPS.find((b) => b.url === tileUrl)!.attribution}</div>}
+      {paletteOpen && <CommandPalette commands={commands} onPick={goTo} onClose={() => setPaletteOpen(false)} />}
     </div>
   )
 }

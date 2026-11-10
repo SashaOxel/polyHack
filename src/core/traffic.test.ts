@@ -95,3 +95,14 @@ describe('полосы', () => {
     for (const v of here) expect(Math.abs(sim.position(v).offset)).toBeLessThanOrEqual(4.8 + 1e-9)
   })
 })
+
+describe('загруженность', () => {
+  it('у светофора на красный — пробка, на зелёный — свободно', () => {
+    const red = new TrafficSim(street(always(false)), 12, 7)
+    const green = new TrafficSim(street(always(true)), 12, 7)
+    for (let i = 0; i < 900; i++) { red.step(0.2); green.step(0.2) }
+    expect(red.wayLoad(1)!).toBeLessThan(0.3)
+    expect(green.wayLoad(1)!).toBeGreaterThan(0.6)
+    expect([...red.loads()].every(([, v]) => v >= 0 && v <= 1)).toBe(true)
+  })
+})

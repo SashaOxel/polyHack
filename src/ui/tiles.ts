@@ -5,6 +5,16 @@
  */
 
 export const DEFAULT_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+export interface Basemap { id: string; label: string; url: string; satellite?: boolean; attribution: string }
+
+/** Готовые подложки. Яндекс сюда намеренно не входит: его тайлы — в другой проекции (EPSG:3395) и только через API с ключом. */
+export const BASEMAPS: Basemap[] = [
+  { id: 'osm', label: 'Схема (OpenStreetMap)', url: DEFAULT_TILE_URL, attribution: '© участники OpenStreetMap' },
+  { id: 'esri', label: 'Спутник (Esri World Imagery)', satellite: true, attribution: 'Снимки © Esri, Maxar, Earthstar Geographics',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}' },
+]
+export const isSatelliteUrl = (url: string) => BASEMAPS.some((b) => b.satellite && b.url === url)
+
 export const WORLD = 40075016.68557849 // длина экватора, м
 
 const cache = new Map<string, HTMLImageElement | 'loading' | 'error'>()

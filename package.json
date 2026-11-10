@@ -12,7 +12,8 @@
     "test": "vitest run",
     "check:sumo": "bash scripts/check-sumo.sh",
     "stats": "vite-node scripts/graph-stats.ts",
-    "export:sumo": "vite-node scripts/export-sumo.ts"
+    "export:sumo": "vite-node scripts/export-sumo.ts",
+    "check:matsim": "vite-node scripts/check-matsim.ts"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0",

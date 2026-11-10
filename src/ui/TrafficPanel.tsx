@@ -33,6 +33,11 @@ export function TrafficPanel() {
           <b>{st.count}</b> машин · <b>{Math.round(st.avgKmh)}</b> км/ч · стоят <b>{st.stopped}</b> · <span className="mono">{mmss(st.time)}</span>
         </div>
       )}
+      {st && (
+        <div className="heat-legend" title="Загруженность: средняя скорость относительно ограничения (слой «Загруженность»)">
+          <span>свободно</span><i /><span>пробка</span>
+        </div>
+      )}
       {traffic.sim && <button className="btn icon" title="Убрать машины" onClick={() => traffic.stop()}>■</button>}
     </div>
   )

@@ -17,7 +17,7 @@ import { hasCrossing, hasSignal, isDrivable, isParkingArea, isTram, laneInfo, wa
 import { store } from '../core/store'
 import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
-import { drawTiles, type View } from './tiles'
+import { drawTiles, isSatelliteUrl, type View } from './tiles'
 
 export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'stop' | 'parking'
 
@@ -27,7 +27,8 @@ interface Props {
   /** какие объекты рисовать (кнопки «Слои») */
   layers: Layers
   theme: Theme
-  focus: { lat: number; lon: number; n: number } | null
+  /** куда перелететь: точка и (необязательно) масштаб; n — чтобы повторный перелёт в ту же точку сработал */
+  focus: { lat: number; lon: number; n: number; scale?: number } | null
   tool: Tool
   /** теги новой дороги в режиме рисования */
   drawTags: Tags
@@ -184,11 +185,37 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     return true
   }
 
+  /**
+   * Плавный перелёт камеры: центр движется со сглаживанием, масштаб меняется в логарифме
+   * и «проседает» посередине пути, если цель далеко — так видно, откуда и куда летим.
+   */
+  const flight = useRef(0)
+  function flyTo(cx: number, cy: number, scale: number, ms = 950) {
+    cancelAnimationFrame(flight.current)
+    const c = canvas.current
+    const from = { ...view.current }
+    const span = c ? Math.min(c.clientWidth || 800, c.clientHeight || 600) / from.scale : 1000
+    const dist = Math.hypot(cx - from.cx, cy - from.cy)
+    const dip = Math.log(1 + dist / Math.max(span, 1)) * 0.9 // насколько отдалиться в середине
+    const t0 = performance.now()
+    const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / ms), e = ease(t)
+      view.current.cx = from.cx + (cx - from.cx) * e
+      view.current.cy = from.cy + (cy - from.cy) * e
+      view.current.scale = Math.exp(Math.log(from.scale) + (Math.log(scale) - Math.log(from.scale)) * e - dip * Math.sin(Math.PI * e))
+      redraw()
+      if (t < 1) flight.current = requestAnimationFrame(step)
+    }
+    flight.current = requestAnimationFrame(step)
+  }
+  /** Любое касание карты останавливает перелёт. */
+  const stopFlight = () => cancelAnimationFrame(flight.current)
+
   /** Масштаб кнопками ± вокруг центра карты. */
   function zoomBy(k: number) {
     const v = view.current
-    v.scale = Math.max(0.005, Math.min(40, v.scale * k))
-    redraw()
+    flyTo(v.cx, v.cy, Math.max(0.005, Math.min(40, v.scale * k)), 280)
   }
 
   /** Масштабная линейка, миникарта (видна только при приближении) — обновляются из draw(). */
@@ -231,9 +258,11 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     const pal = PALETTES[props.current.theme]
     ctx.fillStyle = pal.mapBg
     ctx.fillRect(0, 0, w, h)
-    drawTiles(ctx, view.current, w, h, props.current.tileUrl, redraw, pal.tileFilter !== 'none')
+    const sat = isSatelliteUrl(props.current.tileUrl)
+    drawTiles(ctx, view.current, w, h, props.current.tileUrl, redraw, pal.tileFilter !== 'none' && !sat)
     if (props.current.tileUrl) {
-      ctx.fillStyle = pal.tileOverlay
+      // на спутнике — лёгкое затемнение, чтобы дороги были заметны в любой теме
+      ctx.fillStyle = sat ? 'rgba(8,12,20,0.22)' : pal.tileOverlay
       ctx.fillRect(0, 0, w, h)
     }
 
@@ -763,6 +792,34 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     const sx = (x: number) => (x - v0.cx) * v0.scale + w / 2
     const sy = (y: number) => (v0.cy - y) * v0.scale + h / 2
 
+    // загруженность: дороги цветом средней скорости (как пробки в навигаторах), под машинами
+    if (props.current.layers.heat) {
+      const cache = getRenderCache()
+      const doc = store.doc
+      const x0 = v0.cx - w / 2 / v0.scale, x1 = v0.cx + w / 2 / v0.scale, y0 = v0.cy - h / 2 / v0.scale, y1 = v0.cy + h / 2 / v0.scale
+      const HEAT = ['#dc2626', '#f97316', '#eab308', '#22c55e'] // пробка → свободно
+      const paths = HEAT.map(() => new Path2D())
+      for (const [wayId, load] of sim.loads()) {
+        const b = cache.box.get(wayId)
+        if (!b || b[2] < x0 || b[0] > x1 || b[3] < y0 || b[1] > y1) continue
+        const way = doc.ways.get(wayId)
+        if (!way) continue
+        const k = load < 0.25 ? 0 : load < 0.45 ? 1 : load < 0.7 ? 2 : 3
+        const path = paths[k]
+        way.nodes.forEach((id, i) => {
+          const m = cache.merc.get(id)
+          if (!m) return
+          if (i) path.lineTo(sx(m.x), sy(m.y)); else path.moveTo(sx(m.x), sy(m.y))
+        })
+      }
+      ctx.save()
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+      ctx.lineWidth = Math.max(4, Math.min(16, 3 * ppm * 1.6))
+      ctx.globalAlpha = pal.glow ? 0.8 : 0.7
+      paths.forEach((path, k) => { ctx.strokeStyle = HEAT[k]; ctx.stroke(path) })
+      ctx.restore()
+    }
+
     // сигналы на подходах к светофорам
     const lights = { green: [] as number[], yellow: [] as number[], red: [] as number[] }
     for (const l of sim.approachLights()) {
@@ -1039,6 +1096,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     const rect = () => c.getBoundingClientRect()
 
     const onDown = (e: PointerEvent) => {
+      stopFlight()
       const r = rect()
       const sx = e.clientX - r.left, sy = e.clientY - r.top
       const hit = props.current.tool === 'select' ? pick(sx, sy, r.width, r.height) : null
@@ -1163,6 +1221,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       }
     }
     const onWheel = (e: WheelEvent) => {
+      stopFlight()
       e.preventDefault()
       const r = rect()
       const sx = e.clientX - r.left, sy = e.clientY - r.top
@@ -1217,12 +1276,11 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, tileUrl, issues, layers, theme])
 
-  // переход к проблеме
+  // перелёт к точке (проблема, найденная улица, узел): плавно, с отдалением посередине пути
   useEffect(() => {
     if (!focus) return
     const p = project(focus.lat, focus.lon)
-    view.current = { cx: p.x, cy: p.y, scale: Math.max(view.current.scale, 1.5) }
-    redraw()
+    flyTo(p.x, p.y, focus.scale ?? Math.max(view.current.scale, 1.5))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus])
 
@@ -1273,7 +1331,14 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       <div className="zoom-ctl">
         <button onClick={() => zoomBy(1.5)} title="Приблизить"><Icon name="plus" /></button>
         <button onClick={() => zoomBy(1 / 1.5)} title="Отдалить"><Icon name="minus" /></button>
-        <button onClick={() => { fit(); redraw() }} title="Показать всю сеть"><Icon name="fit" /></button>
+        <button onClick={() => {
+          // считаем вид «вся сеть» и плавно перелетаем к нему
+          const cur = { ...view.current }
+          if (!fit()) return
+          const target = { ...view.current }
+          view.current = cur
+          flyTo(target.cx, target.cy, target.scale, 700)
+        }} title="Показать всю сеть"><Icon name="fit" /></button>
       </div>
 
       <div className="map-hud">

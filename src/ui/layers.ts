@@ -11,11 +11,12 @@ export interface Layers {
   nodeIds: boolean
   issues: boolean
   parking: boolean
+  heat: boolean
 }
 
 export const DEFAULT_LAYERS: Layers = {
   tiles: true, car: true, pedestrian: true, tram: true, lanes: true,
-  signals: true, crossings: true, stops: true, nodeIds: false, issues: true, parking: true,
+  signals: true, crossings: true, stops: true, nodeIds: false, issues: true, parking: true, heat: true,
 }
 
 export const LAYER_LIST: { key: keyof Layers; label: string }[] = [
@@ -27,6 +28,7 @@ export const LAYER_LIST: { key: keyof Layers; label: string }[] = [
   { key: 'crossings', label: 'Переходы' },
   { key: 'stops', label: 'Остановки' },
   { key: 'parking', label: 'Парковки' },
+  { key: 'heat', label: 'Загруженность' },
   { key: 'issues', label: 'Проблемы' },
   { key: 'nodeIds', label: 'Номера узлов' },
   { key: 'tiles', label: 'Подложка' },
