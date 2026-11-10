@@ -2,6 +2,7 @@ import { project, unproject } from '../core/geo'
 import { isDrivable, roadStyle } from '../core/roads'
 import type { OsmDocument } from '../core/types'
 import type { View } from './tiles'
+import { PALETTES, type Theme } from './theme'
 
 /** «Круглая» длина для масштабной линейки: 1, 2, 5 × 10^k, не больше raw. */
 export function niceLength(raw: number): number {
@@ -30,19 +31,22 @@ export function scaleBar(view: View, targetPx = 110): { px: number; label: strin
  */
 export class Minimap {
   private buf: HTMLCanvasElement | null = null
-  private key: { doc: OsmDocument; version: number } | null = null
+  private key: { doc: OsmDocument; version: number; theme: Theme } | null = null
   private ext = { x0: 0, x1: 1, y0: 0, y1: 1 }
   w = 0
   h = 0
+  private theme: Theme = 'light'
 
   constructor(private maxW = 220, private maxH = 160) {}
 
   get ready() { return this.buf !== null && this.w > 0 }
 
   /** Пересобрать буфер, если документ или его версия изменились. */
-  update(doc: OsmDocument, version: number, dpr: number) {
-    if (this.key && this.key.doc === doc && this.key.version === version) return
-    this.key = { doc, version }
+  update(doc: OsmDocument, version: number, dpr: number, theme: Theme = 'light') {
+    if (this.key && this.key.doc === doc && this.key.version === version && this.key.theme === theme) return
+    this.key = { doc, version, theme }
+    this.theme = theme
+    const pal = PALETTES[theme]
 
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
     const ways = [...doc.ways.values()].filter((w) => w.tags.highway)
@@ -81,7 +85,7 @@ export class Minimap {
           const x = (p.x - this.ext.x0) * sx, y = (this.ext.y1 - p.y) * sy
           if (!started) { ctx.moveTo(x, y); started = true } else ctx.lineTo(x, y)
         }
-        ctx.strokeStyle = pass ? roadStyle(way.tags.highway).color : '#c9ced6'
+        ctx.strokeStyle = pass ? pal.road(way.tags.highway) : theme === 'dark' ? '#334155' : '#c9ced6'
         ctx.lineWidth = pass ? Math.max(1, roadStyle(way.tags.highway).width / 3) : 0.6
         ctx.stroke()
       }
@@ -98,7 +102,7 @@ export class Minimap {
     target.style.height = `${this.h}px`
     const ctx = target.getContext('2d')!
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.fillStyle = '#f7f8fa'
+    ctx.fillStyle = this.theme === 'dark' ? '#0b1324' : '#f7f8fa'
     ctx.fillRect(0, 0, this.w, this.h)
     ctx.drawImage(this.buf, 0, 0, this.w, this.h)
 
@@ -114,7 +118,7 @@ export class Minimap {
     ctx.rect(0, 0, this.w, this.h)
     ctx.rect(rx0, ry0, rx1 - rx0, ry1 - ry0)
     ctx.fill('evenodd')
-    ctx.strokeStyle = '#2563eb'
+    ctx.strokeStyle = this.theme === 'dark' ? '#38bdf8' : '#2563eb'
     ctx.lineWidth = 2
     ctx.strokeRect(rx0, ry0, Math.max(3, rx1 - rx0), Math.max(3, ry1 - ry0))
   }

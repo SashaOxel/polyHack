@@ -155,3 +155,38 @@ export const hasSignal = (t: Tags) => t.highway === 'traffic_signals'
 
 /** Узел с пешеходным переходом: highway=crossing или тег crossing=* (в том числе у светофора: crossing=traffic_signals). */
 export const hasCrossing = (t: Tags) => t.highway === 'crossing' || (t.crossing !== undefined && t.crossing !== 'no')
+
+// ---------- трамвайные пути ----------
+
+/** Трамвайные пути (railway=tram). Не дорога для машин, но часть транспортной сети для симулятора. */
+export const isTram = (w: OsmWay) => w.tags.railway === 'tram'
+
+// ---------- русские названия классов дорог ----------
+
+export const HIGHWAY_LABELS: Record<string, string> = {
+  motorway: 'Автомагистраль',
+  trunk: 'Скоростная дорога',
+  primary: 'Магистральная улица',
+  secondary: 'Улица районного значения',
+  tertiary: 'Улица местного значения',
+  residential: 'Жилая улица',
+  unclassified: 'Прочая дорога',
+  service: 'Проезд',
+  living_street: 'Жилая зона',
+  primary_link: 'Съезд с магистральной',
+  secondary_link: 'Съезд с районной',
+  tertiary_link: 'Съезд с местной',
+  footway: 'Пешеходная дорожка',
+  pedestrian: 'Пешеходная улица',
+  steps: 'Лестница',
+  path: 'Тропинка',
+  cycleway: 'Велодорожка',
+}
+
+/** Человеческое название дороги: «Жилая улица», «Пешеходный переход», «Трамвайные пути». */
+export function wayKindLabel(w: OsmWay): string {
+  if (isTram(w)) return 'Трамвайные пути'
+  if (w.tags.highway === 'footway' && w.tags.footway === 'crossing') return 'Пешеходный переход'
+  const hw = w.tags.highway
+  return hw ? HIGHWAY_LABELS[hw] ?? hw : 'Линия'
+}

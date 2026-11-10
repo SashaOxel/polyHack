@@ -1,8 +1,10 @@
-import { stopsAt } from '../core/stops'
+import { isStopPlatform, stopsAt } from '../core/stops'
+import { StopLinkEditor } from './StopLinkEditor'
+import { SignalPlanEditor } from './SignalPlanEditor'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, featureTags, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
-import { speedLimit } from '../core/roads'
+import { HIGHWAY_LABELS, hasSignal, isTram, speedLimit, wayKindLabel } from '../core/roads'
 import { ROAD_TEMPLATES } from '../core/templates'
 import type { OsmWay, Tags } from '../core/types'
 import { ElevationEditor } from './ElevationEditor'
@@ -40,6 +42,10 @@ export function AttributePanel() {
   }
 
   const kind = sel.kind as 'node' | 'way'
+  // место посадки: сама выбранная остановка или остановка, привязанная к выбранному опорному узлу
+  const stopPlatform = kind === 'node'
+    ? (isStopPlatform(el.tags) ? sel.id : selectedStops.find((s) => s.anchor === sel.id)?.platform)
+    : undefined
   const speed = speedLimit(el as OsmWay)
   const apply = (tags: Tags) => setTags(store, kind, sel.id, tags)
   const commitRows = (r: [string, string][]) => apply(Object.fromEntries(r))
@@ -47,26 +53,25 @@ export function AttributePanel() {
 
   return (
     <div className="panel-body">
-      <h3>{selectedStops.length ? 'Остановка · опорный узел № ' + selectedStops[0].anchor :
-        (kind === 'way' ? 'Отрезок дороги ' : 'Узел ') + sel.id}</h3>
+      <h3>{stopPlatform !== undefined ? `Остановка${el.tags.name ? ' «' + el.tags.name + '»' : ''} · узел № ${sel.id}`
+        : selectedStops.length ? 'Опорный узел остановки № ' + sel.id
+        : kind === 'way' ? `${wayKindLabel(el as OsmWay)} · отрезок № ${sel.id}` : 'Узел № ' + sel.id}</h3>
       {kind === 'way' && 'nodes' in el && el.nodes.length === 2 && (
         <div className="note">Границы отрезка · узлы {el.nodes[0]} и {el.nodes[1]}</div>
       )}
 
-      {selectedStops.map(stop => (
-        <div className="stop-details" key={stop.area}>
-          <strong>Автобусная остановка</strong>
-          <div>Пункт остановки · опорный узел № {stop.anchor}</div>
-          <div>Потяните значок остановки, чтобы переместить место посадки.</div>
-        </div>
-      ))}
-      {kind === 'way' && (
+      {stopPlatform !== undefined && <StopLinkEditor platformId={stopPlatform} />}
+      {kind === 'node' && hasSignal(el.tags) && <SignalPlanEditor nodeId={sel.id} />}
+      {kind === 'way' && isTram(el as OsmWay) && (
+        <div className="note strong">Трамвайные пути (railway=tram). В экспорт для симулятора попадают вместе с дорогами.</div>
+      )}
+      {kind === 'way' && !isTram(el as OsmWay) && (
         <>
           <div className="row">
             <label>Класс
               <select value={el.tags.highway ?? ''} onChange={(e) => patch({ highway: e.target.value })}>
                 <option value="">—</option>
-                {HIGHWAYS.map((h) => <option key={h}>{h}</option>)}
+                {HIGHWAYS.map((h) => <option key={h} value={h}>{HIGHWAY_LABELS[h] ?? h} ({h})</option>)}
               </select>
             </label>
             <label>Полосы

@@ -30,7 +30,8 @@ describe('parse / serialize', () => {
 
   it('экспорт «только дороги» оставляет проезжие дороги и их узлы', () => {
     const out = parseOsm(serializeOsm(doc, { onlyRoads: true, keepMeta: false }))
-    const drivable = [...doc.ways.values()].filter(isDrivable).length
+    // дороги для машин + трамвайные пути (часть транспортной сети)
+    const drivable = [...doc.ways.values()].filter((w) => isDrivable(w) || w.tags.railway === 'tram').length
     expect(out.ways.size).toBe(drivable)
     expect([...out.ways.values()].every((w) => w.nodes.every((n) => out.nodes.has(n)))).toBe(true)
     expect([...out.ways.values()].some((w) => w.tags.building)).toBe(false)

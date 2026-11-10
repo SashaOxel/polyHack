@@ -1,6 +1,7 @@
-import { stopsAt } from './stops'
+import { isStopPlatform, linkedStop, nearestWayNode, stopsAt } from './stops'
 import { isDrivable } from './roads'
 import { cumulativeDistance } from './elevation'
+import { writePlan, type SignalPlan } from './signals'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
 import type { OsmDocument, OsmRelation, OsmWay, Tags } from './types'
@@ -273,11 +274,13 @@ export function deleteNode(store: Store, id: number) {
   store.commit('Удалить узел', (tx) => {
     const doc = store.doc
     for (const stop of stopsAt(doc, id)) {
+      // пометку читаем до удаления связки: место посадки, созданное редактором, удаляем, остановку из OSM оставляем
+      const existing = doc.relations.get(stop.area)?.tags['polyhack:platform'] === 'existing'
       tx.deleteRelation(stop.area)
       if (stop.anchor === id) {
         const shared = [...doc.ways.values()].some(w => w.nodes.includes(stop.platform)) ||
           [...doc.relations.values()].some(r => r.members.some(m => m.type === 'node' && m.ref === stop.platform))
-        if (!shared) tx.deleteNode(stop.platform)
+        if (!shared && !existing) tx.deleteNode(stop.platform)
       }
     }
     for (const w of [...doc.ways.values()]) {
@@ -359,31 +362,100 @@ export function placeRoadFeature(store: Store, target: FeatureTarget, feature: R
   return nodeId
 }
 
-/** One transaction creates the position, boarding platform and enclosing stop area. */
-export function placeBusStop(store: Store, target: FeatureTarget, platform: { lat: number; lon: number }) {
+/** Место посадки: точка, где создать новую остановку, или уже существующая остановка из OSM. */
+export type StopPlatform = { lat: number; lon: number } | { id: number }
+
+/**
+ * Автобусная остановка одним действием: опорный узел на дороге + место посадки + stop_area.
+ * Новые узлы в дорогу не вставляются: при клике по отрезку берётся ближайший существующий узел этой дороги.
+ * Если место посадки — существующая остановка ({ id }), новый узел не создаётся, она просто привязывается.
+ */
+export function placeBusStop(store: Store, target: FeatureTarget, platform: StopPlatform) {
   const doc = store.doc
-  const road = target.kind === 'way' ? doc.ways.get(target.wayId) :
-    [...doc.ways.values()].find(w => isDrivable(w) && w.nodes.includes(target.id))
-  if (!road || !isDrivable(road)) throw new Error('Выберите узел или участок автомобильной дороги')
-  if (target.kind === 'node') {
-    const node = doc.nodes.get(target.id)
-    if (!node) throw new Error('Узел отсутствует на карте')
-    if (stopsAt(doc, target.id).length) throw new Error('К этому узлу уже привязана остановка')
-    if (node.tags.public_transport && node.tags.public_transport !== 'stop_position') {
-      throw new Error('У этого узла уже есть другое транспортное назначение')
-    }
+  const anchor = target.kind === 'node' ? target.id : nearestWayNode(doc, target.wayId, target.lat, target.lon)
+  if (anchor === undefined) throw new Error('Выберите узел или участок автомобильной дороги')
+  const road = [...doc.ways.values()].find(w => isDrivable(w) && w.nodes.includes(anchor))
+  if (!road) throw new Error('Выберите узел или участок автомобильной дороги')
+  const node = doc.nodes.get(anchor)
+  if (!node) throw new Error('Узел отсутствует на карте')
+  if (stopsAt(doc, anchor).length) throw new Error('К этому узлу уже привязана остановка')
+  if (node.tags.public_transport && node.tags.public_transport !== 'stop_position') {
+    throw new Error('У этого узла уже есть другое транспортное назначение')
   }
-  let anchor = 0
+  if ('id' in platform) {
+    const existing = doc.nodes.get(platform.id)
+    if (!existing || !isStopPlatform(existing.tags)) throw new Error('Это не остановка')
+    const linked = stopsAt(doc, platform.id)
+    if (linked.length) throw new Error('Эта остановка уже привязана к узлу № ' + linked[0].anchor)
+  }
+
   store.commit('Добавить автобусную остановку', tx => {
-    anchor = target.kind === 'node' ? target.id : insertIntoWay(tx, doc, target.wayId, target.lat, target.lon)
-    const node = doc.nodes.get(anchor)!
     tx.setNode({ ...node, tags: { ...node.tags, public_transport: 'stop_position', bus: 'yes' } })
-    const platformId = tx.newId()
-    tx.setNode({ id: platformId, ...platform, meta: {}, tags: { highway: 'bus_stop', public_transport: 'platform', bus: 'yes' } })
+    let platformId: number
+    if ('id' in platform) {
+      // существующая остановка: свои теги (название и т.д.) сохраняет, недостающие дополняем
+      const existing = doc.nodes.get(platform.id)!
+      platformId = existing.id
+      tx.setNode({ ...existing, tags: { highway: 'bus_stop', ...existing.tags, public_transport: 'platform', bus: 'yes' } })
+    } else {
+      platformId = tx.newId()
+      tx.setNode({ id: platformId, lat: platform.lat, lon: platform.lon, meta: {}, tags: { highway: 'bus_stop', public_transport: 'platform', bus: 'yes' } })
+    }
     tx.setRelation({
-      id: tx.newId(), meta: {}, tags: { type: 'public_transport', public_transport: 'stop_area', 'polyhack:linked': 'yes' },
+      id: tx.newId(), meta: {},
+      tags: {
+        type: 'public_transport', public_transport: 'stop_area', 'polyhack:linked': 'yes',
+        // остановка была в файле до редактора: при удалении опорного узла её не удалять
+        ...('id' in platform ? { 'polyhack:platform': 'existing' } : {}),
+      },
       members: [{ type: 'node', ref: anchor, role: 'stop' }, { type: 'node', ref: platformId, role: 'platform' }],
     })
   })
   return anchor
+}
+
+/**
+ * Привязать остановку (место посадки) к узлу дороги по номеру узла.
+ * Уже привязанная остановка переносится на новый узел; старый узел теряет метку stop_position.
+ */
+export function linkStopToNode(store: Store, platformId: number, nodeId: number) {
+  const doc = store.doc
+  const platform = doc.nodes.get(platformId)
+  if (!platform || !isStopPlatform(platform.tags)) throw new Error('Выбранный объект — не остановка')
+  const node = doc.nodes.get(nodeId)
+  if (!node) throw new Error(`Узла № ${nodeId} нет на карте`)
+  if (!(([...doc.ways.values()].some(w => isDrivable(w) && w.nodes.includes(nodeId))))) {
+    throw new Error(`Узел № ${nodeId} не лежит на дороге для автомобилей`)
+  }
+  if (nodeId === platformId) throw new Error('Остановку нельзя привязать к самой себе')
+  const current = stopsAt(doc, platformId).find(s => s.platform === platformId)
+  if (!current) return placeBusStop(store, { kind: 'node', id: nodeId }, { id: platformId })
+  if (current.anchor === nodeId) return nodeId
+  const busy = stopsAt(doc, nodeId).find(s => s.anchor === nodeId)
+  if (busy) throw new Error(`К узлу № ${nodeId} уже привязана другая остановка`)
+
+  store.commit('Привязать остановку к узлу', tx => {
+    const area = doc.relations.get(current.area)!
+    tx.setRelation({ ...area, members: area.members.map(m => (m.role === 'stop' && m.type === 'node' ? { ...m, ref: nodeId } : m)) })
+    tx.setNode({ ...node, tags: { ...node.tags, public_transport: 'stop_position', bus: 'yes' } })
+    // старый узел больше не опора ни одной остановки — снимаем метку, которую ставил редактор
+    const old = doc.nodes.get(current.anchor)
+    const stillAnchor = [...doc.relations.values()].some(r => r.id !== area.id && linkedStop(r)?.anchor === current.anchor)
+    if (old && !stillAnchor && old.tags.public_transport === 'stop_position') {
+      const tags = { ...old.tags }
+      delete tags.public_transport
+      if (tags.bus === 'yes') delete tags.bus
+      tx.setNode({ ...old, tags })
+    }
+  })
+  return nodeId
+}
+
+// ---------- светофорное регулирование ----------
+
+/** Записать (или удалить при null) план светофорного регулирования на узле светофора. */
+export function setSignalPlan(store: Store, nodeId: number, plan: SignalPlan | null) {
+  const n = store.doc.nodes.get(nodeId)
+  if (!n) return
+  store.commit(plan ? 'Изменить план светофора' : 'Удалить план светофора', (tx) => tx.setNode({ ...n, tags: writePlan(n.tags, plan) }))
 }

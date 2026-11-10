@@ -3,7 +3,7 @@ import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
-import { DRAW_TEMPLATES, isFootTemplate } from './core/templates'
+import { DRAW_TEMPLATES, isFootTemplate, isRailTemplate } from './core/templates'
 import { hasErrors, validate, type Issue } from './validate'
 import { applyAutoFixes, applyFix } from './validate/fixes'
 import { AttributePanel } from './ui/AttributePanel'
@@ -12,17 +12,24 @@ import { MapView, type Tool } from './ui/MapView'
 import { downloadText, pickOsmFile } from './ui/files'
 import { Icon } from './ui/icons'
 import { DEFAULT_TILE_URL } from './ui/tiles'
+import { DEFAULT_LAYERS, LAYER_LIST, type Layers } from './ui/layers'
+import { loadTheme, saveTheme, type Theme } from './ui/theme'
+import { TrafficPanel } from './ui/TrafficPanel'
+import { Dashboard } from './ui/Dashboard'
 
 // 3D грузится отдельным куском (three.js тяжёлый) — только когда откроют вкладку 3D
 const View3D = lazy(() => import('./ui/View3D'))
 
 export function App() {
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
-  const [tab, setTab] = useState<'attrs' | 'issues'>('attrs')
-  const [tiles, setTiles] = useState(true)
+  const [tab, setTab] = useState<'attrs' | 'issues' | 'overview'>('attrs')
+  const [layers, setLayers] = useState<Layers>(DEFAULT_LAYERS)
+  const setLayer = (key: keyof Layers, on: boolean) => setLayers((l) => ({ ...l, [key]: on }))
+  const [layersOpen, setLayersOpen] = useState(false)
+  const [theme, setTheme] = useState<Theme>(loadTheme)
+  useEffect(() => { document.documentElement.dataset.theme = theme; saveTheme(theme) }, [theme])
   const [tileUrl, setTileUrl] = useState(DEFAULT_TILE_URL)
-  const [showPed, setShowPed] = useState(true)
-  const [showNodeIds, setShowNodeIds] = useState(false)
+  const showPed = layers.pedestrian
   const [onlyRoads, setOnlyRoads] = useState(true)
   const [withPed, setWithPed] = useState(false)
   const [keepMeta, setKeepMeta] = useState(false)
@@ -156,8 +163,9 @@ export function App() {
   // пешеходная дорога должна быть видна сразу и попасть в экспорт: включаем показ и «Добавить пешеходные»
   const pickTemplate = (i: number) => {
     setTplIdx(i)
+    if (isRailTemplate(DRAW_TEMPLATES[i])) setLayer('tram', true)
     if (isFootTemplate(DRAW_TEMPLATES[i])) {
-      setShowPed(true)
+      setLayer('pedestrian', true)
       setWithPed(true)
       setStatus('Пешеходные дороги включены в показ и в экспорт (меню «Вид» и «Экспорт»)')
     }
@@ -166,13 +174,13 @@ export function App() {
   const errCount = useMemo(() => issues.filter((i) => i.severity === 'error').length, [issues])
   const loaded = store.doc.nodes.size > 0
 
-  const TOOLS: { id: Tool; icon: string; label: string; key: string }[] = [
-    { id: 'select', icon: 'select', label: 'Выбрать', key: 'V' },
-    { id: 'draw', icon: 'road', label: 'Дорога', key: 'D' },
-    { id: 'node', icon: 'node', label: 'Узел на дороге', key: 'N' },
-    { id: 'signal', icon: 'signal', label: 'Светофор', key: 'T' },
-    { id: 'stop', icon: 'bus', label: 'Автобусная остановка', key: 'B' },
-    { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход', key: 'C' },
+  const TOOLS: { id: Tool; icon: string; label: string; short: string; key: string }[] = [
+    { id: 'select', icon: 'select', label: 'Выбрать и двигать', short: 'Выбор', key: 'V' },
+    { id: 'draw', icon: 'road', label: 'Нарисовать дорогу, дорожку или трамвайные пути', short: 'Дорога', key: 'D' },
+    { id: 'node', icon: 'node', label: 'Узел на дороге', short: 'Узел', key: 'N' },
+    { id: 'signal', icon: 'signal', label: 'Светофор', short: 'Светофор', key: 'T' },
+    { id: 'stop', icon: 'bus', label: 'Автобусная остановка', short: 'Остановка', key: 'B' },
+    { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход на узле дороги', short: 'Переход', key: 'C' },
   ]
 
   return (
@@ -186,7 +194,7 @@ export function App() {
       }}
     >
       <header className="topbar">
-        <div className="brand"><Icon name="road" size={20} /> Редактор УДС</div>
+        <div className="brand"><span className="logo"><Icon name="road" size={18} /></span> Редактор УДС <span className="brand-sub">центр управления</span></div>
 
         <div className="group">
           <button className="btn" onClick={open} title="Ctrl+O"><Icon name="open" /> Открыть</button>
@@ -195,8 +203,8 @@ export function App() {
         </div>
 
         <div className="group">
-          <button className="btn icon" onClick={() => store.undo()} disabled={!store.canUndo} title="Отменить (Ctrl+Z)"><Icon name="undo" /></button>
-          <button className="btn icon" onClick={() => store.redo()} disabled={!store.canRedo} title="Вернуть (Ctrl+Shift+Z)"><Icon name="redo" /></button>
+          <button className="btn" onClick={() => store.undo()} disabled={!store.canUndo} title="Ctrl+Z"><Icon name="undo" /> Отменить</button>
+          <button className="btn" onClick={() => store.redo()} disabled={!store.canRedo} title="Ctrl+Shift+Z"><Icon name="redo" /> Вернуть</button>
         </div>
 
         <div className="seg" role="tablist" aria-label="Режим просмотра">
@@ -207,12 +215,15 @@ export function App() {
 
         <span className="spacer" />
 
+        <button className="btn icon theme-toggle" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} aria-label="Переключить тему">
+          {theme === 'dark' ? '☀' : '☾'}
+        </button>
+
         <details className="menu">
           <summary><Icon name="layers" /> Вид <Icon name="chevron" size={14} /></summary>
           <div className="popover">
-            <label><input type="checkbox" checked={showNodeIds} onChange={e => setShowNodeIds(e.target.checked)} /> Номера узлов</label>
-            <label><input type="checkbox" checked={showPed} onChange={(e) => setShowPed(e.target.checked)} /> Пешеходные дорожки</label>
-            <label><input type="checkbox" checked={tiles} onChange={(e) => setTiles(e.target.checked)} /> Подложка (карта)</label>
+            <div className="field"><span>Какие объекты показывать — кнопка «Слои» на карте справа внизу</span></div>
             <div className="field">
               <span>Адрес тайлов {'{z}/{x}/{y}'}</span>
               <input value={tileUrl} onChange={(e) => setTileUrl(e.target.value)} />
@@ -234,35 +245,58 @@ export function App() {
         <div className="stage">
           <div className="layer" style={{ display: mode === '2d' ? 'block' : 'none' }}>
             <MapView
-              tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus}
-              showNodeIds={showNodeIds} tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+              tileUrl={layers.tiles ? tileUrl : ''} issues={issues} layers={layers} theme={theme} focus={focus}
+              tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
               onStopCreated={() => setTool('select')}
             />
           </div>
           {mode === '3d' && loaded && (
             <Suspense fallback={<div className="loading3d">Загрузка 3D…</div>}>
-              <View3D showPedestrian={showPed} onHint={setStatus} />
+              <View3D showPedestrian={showPed} showTram={layers.tram} showLanes={layers.lanes} theme={theme} onHint={setStatus} />
             </Suspense>
           )}
+
+          <TrafficPanel />
 
           {mode === '2d' && <div className="palette">
             {TOOLS.map((t) => (
               <button key={t.id} aria-label={t.label} aria-pressed={tool === t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label} (${t.key})`}>
                 <Icon name={t.icon} size={20} />
+                <span className="lbl">{t.short}</span>
                 <kbd>{t.key}</kbd>
               </button>
             ))}
           </div>}
+
+          {mode === '2d' && (
+            <div className={layersOpen ? 'layers open' : 'layers'}>
+              <button className="layers-toggle" onClick={() => setLayersOpen(!layersOpen)} title="Какие объекты показывать на карте">
+                <Icon name="layers" /> Слои
+              </button>
+              {layersOpen && (
+                <div className="layers-list">
+                  {LAYER_LIST.map((l) => (
+                    <button key={l.key} className={layers[l.key] ? 'chip on' : 'chip'} aria-pressed={layers[l.key]} onClick={() => setLayer(l.key, !layers[l.key])}>
+                      {l.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {mode === '2d' && tool === 'draw' && (
             <div className="tool-card">
               <b>Новая дорога</b>
               <select value={tplIdx} onChange={(e) => pickTemplate(+e.target.value)} title="Тип новой дороги">
                 <optgroup label="Автомобильные">
-                  {DRAW_TEMPLATES.map((t, i) => (isFootTemplate(t) ? null : <option key={t.name} value={i}>{t.name}</option>))}
+                  {DRAW_TEMPLATES.map((t, i) => (isFootTemplate(t) || isRailTemplate(t) ? null : <option key={t.name} value={i}>{t.name}</option>))}
                 </optgroup>
                 <optgroup label="Пешеходные">
                   {DRAW_TEMPLATES.map((t, i) => (isFootTemplate(t) ? <option key={t.name} value={i}>{t.name}</option> : null))}
+                </optgroup>
+                <optgroup label="Рельсовые">
+                  {DRAW_TEMPLATES.map((t, i) => (isRailTemplate(t) ? <option key={t.name} value={i}>{t.name}</option> : null))}
                 </optgroup>
               </select>
               <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена{isFootTemplate(DRAW_TEMPLATES[tplIdx]) ? ' · пешеходная дорога попадёт в .osm при включённой галочке «Добавить пешеходные»' : ''}</span>
@@ -275,7 +309,7 @@ export function App() {
             </div>
           )}
           {mode === '2d' && tool === 'stop' && (
-            <div className="tool-card"><b>Автобусная остановка</b><span>1. Выберите узел на дороге. 2. Укажите место посадки рядом. Esc — отмена.</span></div>
+            <div className="tool-card"><b>Автобусная остановка</b><span>1. Кликните по дороге — возьмётся ближайший её узел (новый не создаётся). 2. Кликните по существующей остановке «А» или по месту посадки рядом. Esc — отмена.</span></div>
           )}
           {mode === '2d' && tool === 'node' && (
             <div className="tool-card"><b>Узел на дороге</b><span>Кликните по дороге, чтобы поставить на неё узел</span></div>
@@ -298,13 +332,14 @@ export function App() {
 
         <aside>
           <nav>
+            <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Обзор</button>
             <button className={tab === 'attrs' ? 'active' : ''} onClick={() => setTab('attrs')}>Атрибуты</button>
             <button className={tab === 'issues' ? 'active' : ''} onClick={() => setTab('issues')}>
               Проблемы
               {issues.length > 0 && <span className={errCount ? 'badge err' : 'badge'}>{issues.length}</span>}
             </button>
           </nav>
-          {tab === 'attrs' ? <AttributePanel /> : (
+          {tab === 'overview' ? <Dashboard issues={issues} /> : tab === 'attrs' ? <AttributePanel /> : (
             <IssuesPanel
               issues={issues} hiddenCount={allIssues.length - issues.length}
               onFocus={focusIssue} onFix={fixOne} onIgnore={ignoreOne} onFixAll={fixAll}

@@ -1,6 +1,8 @@
 import { distanceM } from '../core/geo'
 import { analyze, buildGraph, waysOfGroup, type RoadGraph } from '../core/graph'
 import { isDrivable } from '../core/roads'
+import { isBusPlatform, linkedStop } from '../core/stops'
+import { checkPlan, readPlan, turnsAt } from '../core/signals'
 import type { OsmDocument } from '../core/types'
 
 /**
@@ -15,6 +17,7 @@ export type Fix =
   | { kind: 'delete-relation'; id: number }
   | { kind: 'merge-nodes'; keep: number; remove: number }
   | { kind: 'delete-ways'; ids: number[] }
+  | { kind: 'link-stop'; platform: number; anchor: number }
 
 export interface Issue {
   /** уникальный ключ проблемы */
@@ -173,7 +176,63 @@ const directedConnectivity: Check = (doc, g) => {
  *  - светофор не на перекрёстке; lanes vs turn:lanes; направление кольца;
  *  - way из одного узла или с повторяющимися подряд узлами.
  */
-const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity]
+/**
+ * Каждая автобусная остановка должна быть привязана к узлу дороги.
+ * Исправление: привязать к ближайшему узлу дороги для машин (автоматически — если он ближе 40 м).
+ */
+const unlinkedStops: Check = (doc) => {
+  const roadNodes: { id: number; lat: number; lon: number }[] = []
+  const seen = new Set<number>()
+  for (const w of doc.ways.values()) {
+    if (!isDrivable(w)) continue
+    for (const id of w.nodes) {
+      const n = doc.nodes.get(id)
+      if (n && !seen.has(id)) { seen.add(id); roadNodes.push(n) }
+    }
+  }
+  // какие узлы уже заняты: опоры и места посадки привязанных остановок (считаем один раз)
+  const anchors = new Set<number>(), platforms = new Set<number>()
+  for (const r of doc.relations.values()) {
+    const s = linkedStop(r)
+    if (s) { anchors.add(s.anchor); platforms.add(s.platform) }
+  }
+  const out: Issue[] = []
+  for (const n of doc.nodes.values()) {
+    if (!isBusPlatform(n.tags) || platforms.has(n.id)) continue
+    let best: { id: number; d: number } | undefined
+    for (const r of roadNodes) {
+      if (anchors.has(r.id)) continue
+      const d = distanceM(n.lat, n.lon, r.lat, r.lon)
+      if (!best || d < best.d) best = { id: r.id, d }
+    }
+    const name = n.tags.name ? ` «${n.tags.name}»` : ''
+    out.push({
+      id: `unlinked-stop:${n.id}`, severity: 'warning', code: 'unlinked-stop', nodeIds: [n.id],
+      message: `Остановка${name} (узел ${n.id}) не привязана к узлу дороги` + (best ? ` — ближайший узел № ${best.id}, ${Math.round(best.d)} м` : ''),
+      at: { lat: n.lat, lon: n.lon },
+      fix: best ? { kind: 'link-stop', platform: n.id, anchor: best.id } : undefined,
+      auto: !!best && best.d < 40,
+    })
+  }
+  return out
+}
+
+/** Планы светофорного регулирования: конфликты, межзелёные, направления без группы. */
+const signalPlans: Check = (doc) => {
+  const out: Issue[] = []
+  for (const n of doc.nodes.values()) {
+    const plan = readPlan(n.tags)
+    if (!plan) continue
+    const problems = checkPlan(plan, turnsAt(doc, n.id))
+    problems.forEach((p, i) => out.push({
+      id: `signal-plan:${n.id}:${i}`, severity: p.level, code: 'signal-plan', nodeIds: [n.id],
+      message: `Светофор ${n.id}: ${p.text}`, at: { lat: n.lat, lon: n.lon },
+    }))
+  }
+  return out
+}
+
+const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity, unlinkedStops, signalPlans]
 
 export function validate(doc: OsmDocument): Issue[] {
   const graph = buildGraph(doc)

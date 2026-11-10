@@ -1,5 +1,5 @@
 import { linkedStop } from './stops'
-import { DRIVABLE, PEDESTRIAN } from './roads'
+import { DRIVABLE, PEDESTRIAN, isTram } from './roads'
 import type { Meta, OsmDocument, OsmNode, OsmRelation, OsmWay, Tags } from './types'
 
 export interface ExportOptions {
@@ -32,8 +32,9 @@ export function selectForExport(doc: OsmDocument, opts: ExportOptions) {
   const used = new Set<number>()
   for (const w of doc.ways.values()) {
     const hw = w.tags.highway
-    if (!hw) continue
-    if (DRIVABLE.has(hw) || (opts.includePedestrian && PEDESTRIAN.has(hw))) {
+    // трамвайные пути — часть транспортной сети (SUMO импортирует railway=tram)
+    if (!hw && !isTram(w)) continue
+    if (isTram(w) || DRIVABLE.has(hw!) || (opts.includePedestrian && PEDESTRIAN.has(hw!))) {
       ways.push(w)
       for (const n of w.nodes) used.add(n)
     }

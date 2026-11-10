@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { elevationContext, wayProfile } from '../core/elevation'
 import { dashPolyline, offsetPolyline, project } from '../core/geo'
-import { hasCrossing, hasSignal, isDrivable, laneInfo, roadStyle } from '../core/roads'
+import { hasCrossing, hasSignal, isDrivable, isTram, laneInfo, roadStyle } from '../core/roads'
 import type { OsmDocument, OsmWay } from '../core/types'
 
 /**
@@ -15,6 +15,12 @@ export interface BuildOptions {
   zScale: number
   buildings: boolean
   pedestrian: boolean
+  /** трамвайные пути (по умолчанию да) */
+  tram?: boolean
+  /** разметка полос (по умолчанию да) */
+  lanes?: boolean
+  /** ночь: тёмное небо, луна, фонари вдоль улиц, светящаяся разметка */
+  night?: boolean
 }
 
 export interface SceneData {
@@ -26,9 +32,13 @@ export interface SceneData {
   radius: number
   /** лента дороги для подсветки выбранной: шире и чуть выше обычной */
   wayRibbon(wayId: number, extraWidth: number, dy: number): THREE.BufferGeometry | null
+  /** lat/lon → мировые координаты сцены (X — восток, Z — юг) */
+  toWorld(lat: number, lon: number): { x: number; z: number }
+  /** высота узла в сцене (с учётом мостов и масштаба высот), если узел на дороге */
+  nodeY(id: number): number | undefined
   /** точка над серединой дороги (по длине) — для подписи/знака */
   wayAnchor(wayId: number, lift?: number): THREE.Vector3 | null
-  stats: { roads: number; buildings: number; bridges: number; signals: number; crossings: number }
+  stats: { roads: number; buildings: number; bridges: number; signals: number; crossings: number; trams: number }
 }
 
 const LANE_W = 3.2
@@ -139,7 +149,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     addRibbon(roadBuf, pts, roadWidth(way), color, { faceWay, wayId: way.id })
 
     // разметка полос: пунктир между полосами, встречная линия жёлтая; у перекрёстков (6 м от концов) не рисуем
-    const li = drivable ? laneInfo(way) : null
+    const li = drivable && opts.lanes !== false ? laneInfo(way) : null
     if (li && li.total >= 2 && pts.length >= 2) {
       const flat = pts.map((q) => ({ x: q.x, y: q.z, h: q.y })) // «y» здесь — вторая горизонтальная ось (Z мира)
       const widthM = li.total * LANE_W
@@ -174,12 +184,33 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     }
   }
 
+  const night = !!opts.night
   const roads = roadBuf.idx.length
     ? new THREE.Mesh(toGeometry(roadBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     : null
-  if (roads) root.add(roads)
+  if (roads) { roads.receiveShadow = true; root.add(roads) }
+  // ---- трамвайные пути: балласт и два рельса (колея 1524 мм) поверх улицы ----
+  const tramWays = opts.tram === false ? [] : [...doc.ways.values()].filter(isTram)
+  const tramBuf: Buf = { pos: [], col: [], idx: [] }
+  const ballast = new THREE.Color('#8b8680'), rail = new THREE.Color('#3b3f45')
+  for (const way of tramWays) {
+    const pts = wayPoints(way, 0.12)
+    if (pts.length < 2) continue
+    addRibbon(tramBuf, pts, 2.6, ballast)
+    const flat = pts.map((q) => ({ x: q.x, y: q.z, h: q.y }))
+    for (const off of [-0.76, 0.76]) {
+      addRibbon(tramBuf, offsetPolyline(flat, off).map((q) => ({ x: q.x, y: (q.h ?? 0) + 0.05, z: q.y })), 0.14, rail)
+    }
+  }
+  if (tramBuf.idx.length) {
+    root.add(new THREE.Mesh(toGeometry(tramBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
+  }
+
   if (markBuf.idx.length) {
-    root.add(new THREE.Mesh(toGeometry(markBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
+    // ночью разметка светится (не зависит от освещения)
+    root.add(new THREE.Mesh(toGeometry(markBuf), night
+      ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+      : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
   }
   if (slabBuf.idx.length) {
     root.add(new THREE.Mesh(toGeometry(slabBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
@@ -254,24 +285,71 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     if (geos.length) {
       const merged = mergeGeometries(geos, false)
       merged.computeVertexNormals()
-      root.add(new THREE.Mesh(merged, new THREE.MeshLambertMaterial({ color: '#cfc9bd' })))
+      const mesh = new THREE.Mesh(merged, new THREE.MeshLambertMaterial(night
+        ? { color: '#47526a', emissive: '#10182b' }
+        : { color: '#d8d2c6' }))
+      mesh.castShadow = true
+      mesh.receiveShadow = true
+      root.add(mesh)
       geos.forEach((g) => g.dispose())
     }
   }
 
   // ---- земля и свет ----
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(radius * 8, radius * 8), new THREE.MeshLambertMaterial({ color: '#e7e5dd' }))
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(radius * 8, radius * 8), new THREE.MeshLambertMaterial({ color: night ? '#101a2e' : '#e4e2d8' }))
   ground.rotation.x = -Math.PI / 2
   ground.position.y = -0.15
+  ground.receiveShadow = true
   root.add(ground)
-  root.add(new THREE.HemisphereLight('#ffffff', '#8a8f99', 1.15))
-  const sun = new THREE.DirectionalLight('#ffffff', 1.0)
-  sun.position.set(radius * 0.6, radius * 1.2, radius * 0.4)
-  root.add(sun)
+  root.add(night ? new THREE.HemisphereLight('#7f9fd6', '#0a1020', 1.1) : new THREE.HemisphereLight('#ffffff', '#8a8f99', 1.0))
+  // солнце (днём) или луна (ночью) с мягкими тенями
+  const sun = new THREE.DirectionalLight(night ? '#a8c0ff' : '#fff4e0', night ? 0.6 : 1.8)
+  sun.position.set(radius * 0.6, radius * 1.1, radius * 0.45)
+  sun.castShadow = true
+  sun.shadow.mapSize.set(2048, 2048)
+  const sc = sun.shadow.camera
+  sc.left = -radius * 1.2; sc.right = radius * 1.2; sc.top = radius * 1.2; sc.bottom = -radius * 1.2
+  sc.near = 1; sc.far = radius * 4
+  sun.shadow.bias = -0.0006
+  sun.shadow.normalBias = 0.6
+  root.add(sun, sun.target)
+
+  // ночью: фонари вдоль улиц (через ~32 м, попеременно по сторонам) — светящиеся точки
+  if (night) {
+    const lamps: number[] = []
+    for (const way of hwWays) {
+      if (!isDrivable(way) || way.tags.highway === 'service') continue
+      const pts = wayPoints(way)
+      const half = roadWidth(way) / 2 + 1.2
+      let run = 0, next = 10, side = 1
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i]
+        const seg = Math.hypot(b.x - a.x, b.z - a.z)
+        if (seg < 0.01) continue
+        const ux = (b.x - a.x) / seg, uz = (b.z - a.z) / seg
+        while (next <= run + seg) {
+          const t = (next - run) / seg
+          lamps.push(a.x + (b.x - a.x) * t - uz * half * side, a.y + (b.y - a.y) * t + 7, a.z + (b.z - a.z) * t + ux * half * side)
+          side = -side
+          next += 32
+        }
+        run += seg
+      }
+    }
+    if (lamps.length) {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.Float32BufferAttribute(lamps, 3))
+      root.add(new THREE.Points(g, new THREE.PointsMaterial({
+        size: 9, map: glowTexture(), color: '#ffd38a', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
+      })))
+    }
+  }
 
   const wayById = (id: number) => doc.ways.get(id)
   return {
     root, roads, faceWay, radius,
+    toWorld: world,
+    nodeY: (id) => nodeY.get(id),
     wayAnchor(wayId, lift = 6) {
       const way = wayById(wayId)
       if (!way) return null
@@ -298,7 +376,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
       addRibbon(buf, wayPoints(way, 0.3 + dy), roadWidth(way) + extraWidth, new THREE.Color('#00b0ff'))
       return buf.idx.length ? toGeometry(buf) : null
     },
-    stats: { roads: hwWays.length, buildings: buildingCount, bridges, signals: spots.length, crossings: crossings.length },
+    stats: { roads: hwWays.length, buildings: buildingCount, bridges, signals: spots.length, crossings: crossings.length, trams: tramWays.length },
   }
 }
 
@@ -311,4 +389,22 @@ export function disposeScene(root: THREE.Object3D) {
     if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
     else mat?.dispose?.()
   })
+}
+
+let glow: THREE.Texture | null = null
+/** Мягкое круглое пятно света (для фонарей, фар, сигналов). */
+export function glowTexture(): THREE.Texture {
+  if (glow) return glow
+  if (typeof document === 'undefined') return (glow = new THREE.Texture())
+  const c = document.createElement('canvas')
+  c.width = c.height = 64
+  const ctx = c.getContext('2d')!
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+  g.addColorStop(0, 'rgba(255,255,255,1)')
+  g.addColorStop(0.25, 'rgba(255,255,255,0.75)')
+  g.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, 64, 64)
+  glow = new THREE.CanvasTexture(c)
+  return glow
 }

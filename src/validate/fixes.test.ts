@@ -23,7 +23,10 @@ describe('исправления проблем', () => {
     expect(applied).toBeGreaterThan(0)
     expect(count(s, 'broken-relation')).toBe(0)
     expect(count(s, 'duplicate-nodes')).toBe(0)
-    expect(s.doc.relations.size).toBeLessThan(before.rel)
+    // битые запреты удалены; зато появились связки остановок, привязанных к ближайшим узлам (< 40 м)
+    const restrictions = [...s.doc.relations.values()].filter((r) => r.tags.type === 'restriction').length
+    expect(restrictions).toBeLessThan([...parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')).relations.values()].filter((r) => r.tags.type === 'restriction').length)
+    expect(count(s, 'unlinked-stop')).toBeLessThan(validate(load().doc).filter((i) => i.code === 'unlinked-stop').length)
 
     s.undo() // один шаг возвращает всё
     expect(s.doc.relations.size).toBe(before.rel)

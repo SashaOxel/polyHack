@@ -22,6 +22,45 @@ function tile(url: string, onLoad: () => void): HTMLImageElement | null {
   return null
 }
 
+/**
+ * Тёмный вариант тайла (инверсия + поворот тона на 180° + приглушение): считается один раз на тайл и кэшируется.
+ * Раньше это делал ctx.filter на каждом кадре — дорого, а в Safari его нет вовсе.
+ */
+const darkCache = new Map<HTMLImageElement, HTMLCanvasElement | 'fail'>()
+function darkTile(img: HTMLImageElement): HTMLCanvasElement | HTMLImageElement {
+  const hit = darkCache.get(img)
+  if (hit) return hit === 'fail' ? img : hit
+  const c = document.createElement('canvas')
+  c.width = img.naturalWidth || 256
+  c.height = img.naturalHeight || 256
+  const ctx = c.getContext('2d')!
+  ctx.drawImage(img, 0, 0)
+  try {
+    const data = ctx.getImageData(0, 0, c.width, c.height)
+    const d = data.data
+    // матрицы CSS-фильтров: hue-rotate(180°) и saturate(0.35)
+    const H = [-0.574, 1.43, 0.144, 0.426, 0.43, 0.144, 0.426, 1.43, -0.856]
+    const k = 0.35
+    const S = [0.213 + 0.787 * k, 0.715 - 0.715 * k, 0.072 - 0.072 * k, 0.213 - 0.213 * k, 0.715 + 0.285 * k, 0.072 - 0.072 * k, 0.213 - 0.213 * k, 0.715 - 0.715 * k, 0.072 + 0.928 * k]
+    const clamp = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v)
+    for (let i = 0; i < d.length; i += 4) {
+      const r0 = 255 - d[i], g0 = 255 - d[i + 1], b0 = 255 - d[i + 2]
+      const r1 = H[0] * r0 + H[1] * g0 + H[2] * b0, g1 = H[3] * r0 + H[4] * g0 + H[5] * b0, b1 = H[6] * r0 + H[7] * g0 + H[8] * b0
+      const r2 = S[0] * r1 + S[1] * g1 + S[2] * b1, g2 = S[3] * r1 + S[4] * g1 + S[5] * b1, b2 = S[6] * r1 + S[7] * g1 + S[8] * b1
+      // brightness(0.62) и contrast(1.15)
+      d[i] = clamp((r2 * 0.62 - 128) * 1.15 + 128)
+      d[i + 1] = clamp((g2 * 0.62 - 128) * 1.15 + 128)
+      d[i + 2] = clamp((b2 * 0.62 - 128) * 1.15 + 128)
+    }
+    ctx.putImageData(data, 0, 0)
+    darkCache.set(img, c)
+    return c
+  } catch {
+    darkCache.set(img, 'fail') // тайл без CORS — рисуем как есть
+    return img
+  }
+}
+
 export interface View {
   /** центр карты в метрах Меркатора */
   cx: number
@@ -31,7 +70,7 @@ export interface View {
 }
 
 export function drawTiles(
-  ctx: CanvasRenderingContext2D, view: View, w: number, h: number, template: string, onLoad: () => void,
+  ctx: CanvasRenderingContext2D, view: View, w: number, h: number, template: string, onLoad: () => void, dark = false,
 ) {
   if (!template) return
   const z = Math.max(0, Math.min(19, Math.round(Math.log2((view.scale * WORLD) / 256))))
@@ -54,7 +93,7 @@ export function drawTiles(
       const sx = (mx - view.cx) * view.scale + w / 2
       const sy = (view.cy - my) * view.scale + h / 2
       const size = tileM * view.scale
-      ctx.drawImage(img, sx, sy, size + 0.5, size + 0.5)
+      ctx.drawImage(dark ? darkTile(img) : img, sx, sy, size + 0.5, size + 0.5)
     }
   }
 }

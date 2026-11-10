@@ -4,6 +4,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildGraph } from './graph'
+import { defaultPlan, turnsAt } from './signals'
+import { buildSumoSignals } from './sumoSignals'
+import { setSignalPlan } from './ops'
 import { drawRoad, moveNode, placeRoadFeature, reverseWay, setElevationRamp } from './ops'
 import { parseOsm } from './parse'
 import { isDrivable } from './roads'
@@ -78,6 +81,51 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
     expect(readFileSync(osm, 'utf8')).toContain(`<way id="${zebra}"`)
     execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
     expect(readFileSync(join(dir, 'out.net.xml'), 'utf8')).toContain('<edge ')
+  }, 120000)
+
+  it('трамвайные пути (из файла и нарисованные) попадают в сеть SUMO', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    const id = drawRoad(s, [{ kind: 'new', lat: 52.262, lon: 104.259 }, { kind: 'new', lat: 52.263, lon: 104.259 }, { kind: 'new', lat: 52.264, lon: 104.2595 }],
+      { railway: 'tram', gauge: '1524', electrified: 'contact_line' })
+    const dir = mkdtempSync(join(tmpdir(), 'uds-tram-'))
+    const osm = join(dir, 'tram.osm')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
+    const net = readFileSync(join(dir, 'out.net.xml'), 'utf8')
+    expect(net).toContain('railway.tram')
+    expect(net).toContain(`id="${id}`)
+  }, 120000)
+
+  it('план светофора превращается в программу SUMO, и SUMO её запускает', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    const g = buildGraph(s.doc)
+    const junction = [...g.nodes.values()].find((n) => n.in.length >= 3 && n.out.length >= 3 && s.doc.nodes.get(n.id)!.tags.highway === undefined)!
+    placeRoadFeature(s, { kind: 'node', id: junction.id }, 'signal')
+    const plan = { ...defaultPlan(s.doc, junction.id, 70), offset: 11 }
+    setSignalPlan(s, junction.id, plan)
+
+    const dir = mkdtempSync(join(tmpdir(), 'uds-sig-'))
+    const osm = join(dir, 'map.osm'), net = join(dir, 'map.net.xml'), add = join(dir, 'signals.add.xml')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', net], { stdio: 'pipe' })
+    const { programs, xml, warnings } = buildSumoSignals(s.doc, readFileSync(net, 'utf8'))
+    expect(programs).toHaveLength(1)
+    const p = programs[0]
+    expect(p.unmatched).toBe(0) // каждое соединение SUMO нашло своё направление в плане
+    expect(warnings).toEqual([])
+    expect(p.offset).toBe(11)
+    expect(p.phases.reduce((a, x) => a + x.duration, 0)).toBeCloseTo(70, 6) // фазы покрывают ровно цикл
+    expect(p.phases.some((x) => x.state.includes('y'))).toBe(true)
+    expect(p.phases.every((x) => x.state.length === p.links)).toBe(true)
+    // все направления плана реально присутствуют в соединениях: число сигналов не меньше числа направлений
+    expect(p.links).toBeGreaterThanOrEqual(turnsAt(s.doc, junction.id).length)
+    writeFileSync(add, xml)
+    // SUMO загружает сеть с нашей программой и проигрывает 2 цикла без ошибок
+    const sumo = join(netconvert!, '..', 'sumo')
+    execFileSync(sumo, ['-n', net, '-a', add, '--end', '140', '--no-step-log', '--error-log', join(dir, 'err.log')], { stdio: 'pipe' })
+    expect(readFileSync(join(dir, 'err.log'), 'utf8').trim()).toBe('')
   }, 120000)
 
   it('файл с высотами (тег ele) проходит через SUMO', () => {

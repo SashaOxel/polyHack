@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check:sumo": "bash scripts/check-sumo.sh",
-    "stats": "vite-node scripts/graph-stats.ts"
+    "stats": "vite-node scripts/graph-stats.ts",
+    "export:sumo": "vite-node scripts/export-sumo.ts"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0",

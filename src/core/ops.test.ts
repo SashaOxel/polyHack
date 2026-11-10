@@ -244,6 +244,6 @@ describe('пешеходные дороги', () => {
   })
 
   it('дорожка-переход несёт footway=crossing', () => {
-    expect(foot('Переход (дорожка через дорогу)').tags).toEqual({ highway: 'footway', footway: 'crossing' })
+    expect(foot('Пешеходный переход').tags).toEqual({ highway: 'footway', footway: 'crossing' })
   })
 })

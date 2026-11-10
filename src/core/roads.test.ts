@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { laneInfo, speedLimit, wayMidpoint } from './roads'
+import { isTram, laneInfo, speedLimit, wayKindLabel, wayMidpoint } from './roads'
+import { serializeOsm } from './serialize'
+import { drawRoad } from './ops'
+import { Store } from './store'
+import { DRAW_TEMPLATES } from './templates'
 import { emptyDocument, type OsmWay, type Tags } from './types'
 
 const way = (tags: Tags): OsmWay => ({ id: 1, nodes: [], tags: { highway: 'residential', ...tags }, meta: {} })
@@ -83,5 +87,26 @@ describe('laneInfo', () => {
     expect(laneInfo(way({ highway: 'footway' }))).toBeNull()
     expect(laneInfo(way({ lanes: 'abc' }))?.total).toBe(2)
     expect(laneInfo(way({ lanes: '40' }))?.total).toBe(10)
+  })
+})
+
+describe('трамвайные пути и названия', () => {
+  it('рисуются шаблоном и попадают в экспорт «только дороги»', () => {
+    const s = new Store()
+    s.load(emptyDocument(), 't.osm')
+    const tpl = DRAW_TEMPLATES.find((t) => t.name === 'Трамвайные пути')!
+    const id = drawRoad(s, [{ kind: 'new', lat: 52, lon: 104 }, { kind: 'new', lat: 52.001, lon: 104 }], tpl.tags)
+    const w = s.doc.ways.get(id)!
+    expect(isTram(w)).toBe(true)
+    expect(laneInfo(w)).toBeNull() // не дорога для машин
+    expect(serializeOsm(s.doc, { onlyRoads: true })).toContain('k="railway" v="tram"')
+  })
+
+  it('понятные названия типов', () => {
+    expect(wayKindLabel(way({}))).toBe('Жилая улица')
+    expect(wayKindLabel(way({ highway: 'footway', footway: 'crossing' }))).toBe('Пешеходный переход')
+    expect(wayKindLabel({ id: 1, nodes: [], meta: {}, tags: { railway: 'tram' } })).toBe('Трамвайные пути')
+    expect(DRAW_TEMPLATES.map((t) => t.name)).toContain('Пешеходный переход')
+    expect(DRAW_TEMPLATES.map((t) => t.name).some((n) => n.includes('дорожка через дорогу'))).toBe(false)
   })
 })
