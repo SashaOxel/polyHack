@@ -15,6 +15,7 @@ const paths: Record<string, ReactNode> = {
   save: <><path d="M5 4h11l3 3v13H5V4z" /><path d="M8 4v5h7V4M8 20v-6h8v6" /></>,
   signal: <><rect x="8" y="2.5" width="8" height="19" rx="3" /><circle cx="12" cy="7" r="1.3" /><circle cx="12" cy="12" r="1.3" /><circle cx="12" cy="17" r="1.3" /></>,
   crossing: <><path d="M3 5v14M8 5v14M13 5v14M18 5v14M22 5v14" /></>,
+  sign: <><path d="M12 2.5l9.5 9.5-9.5 9.5L2.5 12 12 2.5z" /><path d="M12 21.5V24" /></>,
   parking: <><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M10 16V8h3a2.5 2.5 0 010 5h-3" /></>,
   chevron: <path d="M6 9l6 6 6-6" />,
   layers: <><path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13l9 5 9-5" /></>,

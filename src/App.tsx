@@ -13,6 +13,7 @@ import { MapView, type Tool } from './ui/MapView'
 import { downloadText, pickOsmFile } from './ui/files'
 import { Icon } from './ui/icons'
 import { BASEMAPS, DEFAULT_TILE_URL } from './ui/tiles'
+import { SIGNS, type SignKind } from './core/signs'
 import { DEFAULT_LAYERS, LAYER_LIST, type Layers } from './ui/layers'
 import { loadTheme, saveTheme, type Theme } from './ui/theme'
 import { TrafficPanel } from './ui/TrafficPanel'
@@ -51,6 +52,7 @@ export function App() {
   // 3D: ночь и облёт — здесь, чтобы ими управляли режим презентации и командная палитра
   const [night3d, setNight3d] = useState(() => loadTheme() === 'dark')
   const [flying3d, setFlying3d] = useState(false)
+  const [signKind, setSignKind] = useState<SignKind>('giveway')
   const [presenting, setPresenting] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const beforePresent = useRef<'2d' | '3d'>('2d')
@@ -139,6 +141,7 @@ export function App() {
       else if (key === 'n' && mode === '2d') setTool('node')
       else if (key === 't' && mode === '2d') setTool('signal')
       else if (key === 'c' && mode === '2d') setTool('crossing')
+      else if (key === 'g' && mode === '2d') setTool('sign')
       else if (key === 'p' && mode === '2d') setTool('parking')
       // действия над выбранным объектом (в режиме рисования Backspace убирает точку, а не удаляет)
       else if (sel?.kind === 'way' && key === 'r') reverseWay(store, sel.id)
@@ -248,7 +251,10 @@ export function App() {
     { id: 't-signal', label: 'Инструмент: светофор', hint: 'T', icon: '🚦', keywords: 'светофор signal', run: tool2d('signal') },
     { id: 't-crossing', label: 'Инструмент: пешеходный переход', hint: 'C', icon: '🚸', keywords: 'переход зебра crossing', run: tool2d('crossing') },
     { id: 't-stop', label: 'Инструмент: автобусная остановка', hint: 'B', icon: '🚏', keywords: 'остановка stop', run: tool2d('stop') },
+    { id: 't-sign', label: 'Инструмент: знак приоритета (главная / уступи)', hint: 'G', icon: '◆', keywords: 'знак пдд главная второстепенная уступи стоп приоритет sign', run: tool2d('sign') },
+    ...(Object.keys(SIGNS) as SignKind[]).map((k) => ({ id: `sign-${k}`, label: `Знак ${SIGNS[k].code}: ${SIGNS[k].label}`, icon: '◆', keywords: 'знак пдд приоритет', run: () => { setSignKind(k); tool2d('sign')() } })),
     { id: 't-parking', label: 'Инструмент: парковка', hint: 'P', icon: '🅿', keywords: 'парковка стоянка parking', run: tool2d('parking') },
+    { id: 'reach', label: layers.reach ? 'Скрыть недостижимые участки' : 'Показать недостижимые для машин участки', icon: '⛔', keywords: 'связность достижимость ловушка тупик остров oneway', run: () => { setLayer('reach', !layers.reach); setMode('2d'); setTab('overview') } },
     { id: 'routes', label: 'Маршруты общественного транспорта', icon: '🚌', keywords: 'маршрут автобус трамвай routes', run: () => setTab('routes') },
     { id: 'overview', label: 'Обзор сети', icon: '📊', keywords: 'обзор дашборд статистика', run: () => setTab('overview') },
     { id: 'issues', label: 'Проблемы', icon: '⚠', keywords: 'проблемы ошибки валидатор', run: () => setTab('issues') },
@@ -268,6 +274,7 @@ export function App() {
     { id: 'signal', icon: 'signal', label: 'Светофор', short: 'Светофор', key: 'T' },
     { id: 'stop', icon: 'bus', label: 'Автобусная остановка', short: 'Остановка', key: 'B' },
     { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход на узле дороги', short: 'Переход', key: 'C' },
+    { id: 'sign', icon: 'sign', label: 'Знак приоритета: главная дорога, уступи, стоп', short: 'Знаки', key: 'G' },
     { id: 'parking', icon: 'parking', label: 'Парковка: обвести площадь', short: 'Парковка', key: 'P' },
   ]
 
@@ -348,7 +355,7 @@ export function App() {
           <div className="layer" style={{ display: mode === '2d' ? 'block' : 'none' }}>
             <MapView
               tileUrl={layers.tiles ? tileUrl : ''} issues={issues} layers={layers} theme={theme} focus={focus}
-              tool={tool} drawTags={drawTags} onHint={setStatus}
+              tool={tool} drawTags={drawTags} onHint={setStatus} signKind={signKind}
               onStopCreated={() => setTool('select')}
             />
           </div>
@@ -445,6 +452,17 @@ export function App() {
               <span>Клик по дороге: на ней появится узел с тегом {tool === 'signal' ? 'highway=traffic_signals' : 'highway=crossing'} — это попадёт в .osm</span>
             </div>
           )}
+          {mode === '2d' && tool === 'sign' && (
+            <div className="tool-card">
+              <b>Знак приоритета</b>
+              <div className="seg">
+                {(Object.keys(SIGNS) as SignKind[]).map((k) => (
+                  <button key={k} className={signKind === k ? 'active' : ''} onClick={() => setSignKind(k)} title={SIGNS[k].label}>{SIGNS[k].code} {SIGNS[k].short}</button>
+                ))}
+              </div>
+              <span>Кликните по дороге <b>перед перекрёстком</b>: знак смотрит на ближайший перекрёсток и действует для движения к нему. Второстепенная — «Уступи» или «Стоп», главная — 2.1. В .osm: {Object.entries(SIGNS[signKind].tags).map(([k, v]) => `${k}=${v}`).join(', ')}</span>
+            </div>
+          )}
           {mode === '2d' && tool === 'stop' && (
             <div className="tool-card"><b>Автобусная остановка</b><span>1. Кликните по дороге — возьмётся ближайший её узел (новый не создаётся). 2. Кликните по существующей остановке «А» или по месту посадки рядом. Esc — отмена.</span></div>
           )}
@@ -477,7 +495,8 @@ export function App() {
               {issues.length > 0 && <span className={errCount ? 'badge err' : 'badge'}>{issues.length}</span>}
             </button>
           </nav>
-          {tab === 'overview' ? <Dashboard issues={issues} /> : tab === 'routes' ? <RoutesPanel onHint={setStatus} /> : tab === 'attrs' ? <AttributePanel /> : (
+          {tab === 'overview' ? <Dashboard issues={issues} onShowReach={() => { setLayer('reach', true); setMode('2d') }}
+            onGoReach={(g) => { setLayer('reach', true); setMode('2d'); setFocus({ lat: g.at.lat, lon: g.at.lon, n: Date.now(), scale: 1.2 }) }} /> : tab === 'routes' ? <RoutesPanel onHint={setStatus} /> : tab === 'attrs' ? <AttributePanel /> : (
             <IssuesPanel
               issues={issues} hiddenCount={allIssues.length - issues.length}
               onFocus={focusIssue} onFix={fixOne} onIgnore={ignoreOne} onFixAll={fixAll}

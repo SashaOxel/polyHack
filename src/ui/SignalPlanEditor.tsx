@@ -1,12 +1,70 @@
 import { useEffect, useMemo, useState } from 'react'
-import { setSignalPlan } from '../core/ops'
+import { linkSignals, setSignalPlan, unlinkSignals } from '../core/ops'
+import { distanceM } from '../core/geo'
+import { hasSignal } from '../core/roads'
 import {
-  checkPlan, corridorDistance, defaultPlan, GROUP_COLORS, greenTime, greenWaveOffset, readPlan, turnLabel, turnsAt, websterDelay,
+  checkPlan, corridorDistance, defaultPlan, GROUP_COLORS, greenTime, greenWaveOffset, pairOf, readPlan, turnLabel, turnsAt, websterDelay,
   type SignalPlan,
 } from '../core/signals'
 import { store } from '../core/store'
 
 const clone = (p: SignalPlan): SignalPlan => structuredClone(p)
+
+/**
+ * Пара светофоров: два светофора работают синхронно (например, на одном пешеходном переходе через разделённую дорогу).
+ * Тайминги у пары общие: правка плана одного повторяется на втором.
+ */
+export function SignalPair({ nodeId, onGo }: { nodeId: number; onGo?: (id: number) => void }) {
+  const [error, setError] = useState('')
+  const node = store.doc.nodes.get(nodeId)
+  const partnerId = node ? pairOf(node.tags) : undefined
+  const partner = partnerId !== undefined ? store.doc.nodes.get(partnerId) : undefined
+  const near = useMemo(() => {
+    if (!node) return []
+    return [...store.doc.nodes.values()]
+      .filter((n) => n.id !== nodeId && hasSignal(n.tags))
+      .map((n) => ({ id: n.id, d: distanceM(node.lat, node.lon, n.lat, n.lon) }))
+      .filter((x) => x.d <= 120).sort((a, b) => a.d - b.d).slice(0, 6)
+  }, [nodeId, store.docVersion]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!node) return null
+  const run = (f: () => void) => { try { f(); setError('') } catch (e) { setError((e as Error).message) } }
+  return (
+    <div className="signal-box pair">
+      <strong>Пара светофоров</strong>
+      {partner ? (
+        <>
+          <div className="note strong">Работает синхронно с узлом № {partner.id} ({Math.round(distanceM(node.lat, node.lon, partner.lat, partner.lon))} м). Тайминги общие: правка плана одного повторится на втором.</div>
+          <div className="row">
+            {onGo && <button onClick={() => onGo(partner.id)}>Перейти к № {partner.id}</button>}
+            <button onClick={() => run(() => unlinkSignals(store, nodeId))}>Разорвать пару</button>
+          </div>
+        </>
+      ) : near.length ? (
+        <>
+          <div className="note">Светофоры рядом — связав их, получите одинаковые тайминги (один и тот же цикл и время зелёного):</div>
+          {near.map((x) => (
+            <div className="row" key={x.id}>
+              <span className="grow">Узел № {x.id} · {Math.round(x.d)} м</span>
+              <button onClick={() => run(() => linkSignals(store, nodeId, x.id))}>Связать</button>
+            </div>
+          ))}
+        </>
+      ) : <div className="note">Рядом (в пределах 120 м) других светофоров нет. Можно связать по номеру узла ниже.</div>}
+      {!partner && <ByNumber onLink={(id) => run(() => linkSignals(store, nodeId, id))} />}
+      {error && <div className="error-text">{error}</div>}
+    </div>
+  )
+}
+
+function ByNumber({ onLink }: { onLink: (id: number) => void }) {
+  const [v, setV] = useState('')
+  return (
+    <div className="row">
+      <label className="grow">или № узла<input inputMode="numeric" value={v} onChange={(e) => setV(e.target.value)} /></label>
+      <button disabled={!v.trim()} onClick={() => onLink(Number(v))}>Связать</button>
+    </div>
+  )
+}
 
 /** Диаграмма цикла: по строке на группу — зелёный, жёлтый, красный; сверху шкала секунд. */
 function Timeline({ plan }: { plan: SignalPlan }) {

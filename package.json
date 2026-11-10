@@ -13,7 +13,11 @@
     "check:sumo": "bash scripts/check-sumo.sh",
     "stats": "vite-node scripts/graph-stats.ts",
     "export:sumo": "vite-node scripts/export-sumo.ts",
-    "check:matsim": "vite-node scripts/check-matsim.ts"
+    "check:matsim": "vite-node scripts/check-matsim.ts",
+    "make:submission": "vite-node scripts/make-submission.ts",
+    "reach": "vite-node scripts/reach-report.ts",
+    "checklist": "vite-node scripts/checklist.ts",
+    "merge:split": "vite-node scripts/merge-split.ts"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0",

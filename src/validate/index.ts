@@ -1,6 +1,7 @@
 import { distanceM } from '../core/geo'
+import { findCrossings } from '../core/crossings'
 import { analyze, buildGraph, waysOfGroup, type RoadGraph } from '../core/graph'
-import { isDrivable } from '../core/roads'
+import { MAXSPEED_KEYS, isDrivable, normalizedMaxspeed } from '../core/roads'
 import { isBusPlatform, linkedStop } from '../core/stops'
 import { checkPlan, readPlan, turnsAt } from '../core/signals'
 import { isRouteRelation, readRoute, routePath } from '../core/routes'
@@ -20,6 +21,8 @@ export type Fix =
   | { kind: 'delete-ways'; ids: number[] }
   | { kind: 'link-stop'; platform: number; anchor: number }
   | { kind: 'rebuild-route'; id: number }
+  | { kind: 'normalize-maxspeed'; wayIds: number[] }
+  | { kind: 'make-junction'; a: number; b: number; lat: number; lon: number }
 
 export interface Issue {
   /** уникальный ключ проблемы */
@@ -257,7 +260,48 @@ const routes: Check = (doc) => {
   return out
 }
 
-const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity, unlinkedStops, signalPlans, routes]
+/**
+ * Ограничение скорости не числом (maxspeed=RU:urban, «60 km/h»): SUMO, MATSim и Webots числа читают надёжно,
+ * а зоны — по-разному или никак. RU:urban → 60, RU:rural → 90, RU:motorway → 110, RU:living_street → 20.
+ */
+const numericMaxspeed: Check = (doc) => {
+  const wayIds: number[] = []
+  const seen = new Map<string, string>()
+  for (const w of doc.ways.values()) {
+    if (!isDrivable(w)) continue
+    let bad = false
+    for (const k of MAXSPEED_KEYS) {
+      const n = normalizedMaxspeed(w.tags[k])
+      if (n !== undefined) { bad = true; seen.set(w.tags[k], n) }
+    }
+    if (bad) wayIds.push(w.id)
+  }
+  if (!wayIds.length) return []
+  const first = doc.ways.get(wayIds[0])!
+  const n = doc.nodes.get(first.nodes[0])
+  return [{
+    id: 'maxspeed-nonnumeric', severity: 'warning', code: 'maxspeed-nonnumeric', wayIds,
+    message: `Скорость задана не числом у ${wayIds.length} дорог: ${[...seen].map(([a, b]) => `${a} → ${b}`).join(', ')} км/ч`,
+    at: n ? { lat: n.lat, lon: n.lon } : undefined,
+    fix: { kind: 'normalize-maxspeed', wayIds }, auto: true,
+  }]
+}
+
+/**
+ * Разорванный перекрёсток: две дороги пересекаются без общего узла (на одном уровне, без моста/тоннеля).
+ * Машины не смогут повернуть с одной на другую. Исправление не автоматическое: это может быть путепровод.
+ */
+const tornJunctions: Check = (doc) => {
+  const nm = (id: number) => doc.ways.get(id)?.tags.name ?? `дорога ${id}`
+  return findCrossings(doc).map((c) => ({
+    id: `torn-junction:${c.a}-${c.b}`, severity: 'warning' as const, code: 'torn-junction', wayIds: [c.a, c.b],
+    message: `Дороги «${nm(c.a)}» (${c.a}) и «${nm(c.b)}» (${c.b}) пересекаются без общего узла — перекрёсток не склеен? (если это путепровод, скройте)`,
+    at: { lat: c.lat, lon: c.lon },
+    fix: { kind: 'make-junction' as const, a: c.a, b: c.b, lat: c.lat, lon: c.lon },
+  }))
+}
+
+const CHECKS: Check[] = [tornJunctions, numericMaxspeed, missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity, unlinkedStops, signalPlans, routes]
 
 export function validate(doc: OsmDocument): Issue[] {
   const graph = buildGraph(doc)

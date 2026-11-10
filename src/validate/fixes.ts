@@ -1,4 +1,5 @@
-import { deleteRelation, deleteWays, linkStopToNode, mergeNodes, saveRoute } from '../core/ops'
+import { deleteRelation, deleteWays, linkStopToNode, makeJunction, mergeNodes, saveRoute, setTags } from '../core/ops'
+import { MAXSPEED_KEYS, normalizedMaxspeed } from '../core/roads'
 import { readRoute } from '../core/routes'
 import type { Store } from '../core/store'
 import type { Fix, Issue } from './index'
@@ -11,6 +12,8 @@ export function fixLabel(fix: Fix): string {
     case 'delete-ways': return `Удалить участок (${fix.ids.length})`
     case 'link-stop': return `Привязать к узлу № ${fix.anchor}`
     case 'rebuild-route': return 'Перестроить маршрут'
+    case 'normalize-maxspeed': return `Записать числом (${fix.wayIds.length})`
+    case 'make-junction': return 'Создать перекрёсток'
   }
 }
 
@@ -25,6 +28,22 @@ export function applyFix(store: Store, fix: Fix) {
       if (!r) return
       const info = readRoute(store.doc, r)
       try { saveRoute(store, { kind: info.kind, ref: info.ref, name: r.tags.name, colour: r.tags.colour, stops: info.stops }, fix.id) } catch { /* пути нет — останется ошибкой */ }
+      return
+    }
+    case 'make-junction': {
+      try { makeJunction(store, fix.a, fix.b, fix.lat, fix.lon) } catch { /* дороги уже изменились */ }
+      return
+    }
+    case 'normalize-maxspeed': {
+      store.group('Скорость числом', () => {
+        for (const id of fix.wayIds) {
+          const w = store.doc.ways.get(id)
+          if (!w) continue
+          const tags = { ...w.tags }
+          for (const k of MAXSPEED_KEYS) { const n = normalizedMaxspeed(tags[k]); if (n !== undefined) tags[k] = n }
+          setTags(store, 'way', id, tags)
+        }
+      })
       return
     }
     case 'link-stop': {

@@ -1,7 +1,9 @@
 import { isStopPlatform, linkedStop, nearestWayNode, stopsAt } from './stops'
-import { isDrivable } from './roads'
+import { isDrivable, onewayDirection } from './roads'
+import { SIGNS, approachDirection, blocksSign, driveWaysAt, signTags, type SignKind } from './signs'
 import { cumulativeDistance } from './elevation'
-import { writePlan, type SignalPlan } from './signals'
+import { PAIR_TAG, defaultPlan, pairOf, readPlan, syncTimings, writePlan, type SignalPlan } from './signals'
+import { hasSignal } from './roads'
 import { buildRouteRelation, type RouteDraft } from './routes'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
@@ -204,6 +206,38 @@ export function insertNodeOnWay(store: Store, wayId: number, lat: number, lon: n
   return id
 }
 
+/** Вставить уже существующий узел в ближайший отрезок дороги (форма дороги не меняется, узел лежит на отрезке). */
+function insertNodeRefIntoWay(tx: Tx, doc: OsmDocument, wayId: number, nodeId: number) {
+  const way = doc.ways.get(wayId), node = doc.nodes.get(nodeId)
+  if (!way || !node) throw new Error('Нет дороги или узла')
+  if (way.nodes.includes(nodeId)) return
+  const p = project(node.lat, node.lon)
+  let best = { i: -1, dist: Infinity }
+  for (let i = 0; i < way.nodes.length - 1; i++) {
+    const a = doc.nodes.get(way.nodes[i]), b = doc.nodes.get(way.nodes[i + 1])
+    if (!a || !b) continue
+    const r = nearestOnSegment(p, project(a.lat, a.lon), project(b.lat, b.lon))
+    if (r.dist < best.dist) best = { i, dist: r.dist }
+  }
+  if (best.i < 0) throw new Error(`У дороги ${wayId} нет отрезков`)
+  tx.setWay({ ...way, nodes: [...way.nodes.slice(0, best.i + 1), nodeId, ...way.nodes.slice(best.i + 1)] })
+}
+
+/**
+ * Сделать перекрёсток там, где две дороги пересекаются без общего узла: общий узел в точке пересечения,
+ * вставленный в обе дороги. Один шаг undo.
+ */
+export function makeJunction(store: Store, wayA: number, wayB: number, lat: number, lon: number): number {
+  const doc = store.doc
+  if (!doc.ways.has(wayA) || !doc.ways.has(wayB)) throw new Error('Дороги не найдены')
+  let id = 0
+  store.commit('Создать перекрёсток', (tx) => {
+    id = insertIntoWay(tx, doc, wayA, lat, lon)
+    insertNodeRefIntoWay(tx, doc, wayB, id)
+  })
+  return id
+}
+
 // ---------- разрез ----------
 
 function splitInTx(tx: Tx, doc: OsmDocument, way: OsmWay, index: number) {
@@ -363,6 +397,36 @@ export function placeRoadFeature(store: Store, target: FeatureTarget, feature: R
   return nodeId
 }
 
+/**
+ * Поставить знак приоритета (главная / уступи / стоп) одним шагом undo.
+ * Клик по отрезку — новый узел со знаком, клик по узлу — знак на нём (на перекрёстке сам узел не годится:
+ * непонятно, на какую дорогу знак — ставьте на дорогу рядом с ним).
+ */
+export function placeSign(store: Store, target: FeatureTarget, kind: SignKind): number {
+  const doc = store.doc
+  let way: OsmWay | undefined
+  let at: { node: number } | { lat: number; lon: number }
+  if (target.kind === 'node') {
+    const ways = driveWaysAt(doc, target.id)
+    if (ways.length === 0) throw new Error('Знак ставится на автомобильную дорогу')
+    if (ways.length > 1) throw new Error('Это перекрёсток — кликните по дороге рядом с ним, чтобы было ясно, для какой дороги знак')
+    way = ways[0]; at = { node: target.id }
+    if (blocksSign(doc.nodes.get(target.id)?.tags ?? {}, kind)) throw new Error('На этом узле уже светофор или переход — выберите другую точку дороги')
+  } else {
+    way = doc.ways.get(target.wayId)
+    if (!way || !isDrivable(way)) throw new Error('Знак ставится на автомобильную дорогу')
+    at = { lat: target.lat, lon: target.lon }
+  }
+  const direction = onewayDirection(way) === 0 ? approachDirection(doc, way, at) : undefined
+  let nodeId = 0
+  store.commit(`Знак ${SIGNS[kind].code} ${SIGNS[kind].label}`, (tx) => {
+    nodeId = target.kind === 'node' ? target.id : insertIntoWay(tx, doc, target.wayId, target.lat, target.lon)
+    const n = store.doc.nodes.get(nodeId)
+    if (n) tx.setNode({ ...n, tags: signTags(n.tags, kind, direction) })
+  })
+  return nodeId
+}
+
 /** Место посадки: точка, где создать новую остановку, или уже существующая остановка из OSM. */
 export type StopPlatform = { lat: number; lon: number } | { id: number }
 
@@ -458,7 +522,52 @@ export function linkStopToNode(store: Store, platformId: number, nodeId: number)
 export function setSignalPlan(store: Store, nodeId: number, plan: SignalPlan | null) {
   const n = store.doc.nodes.get(nodeId)
   if (!n) return
-  store.commit(plan ? 'Изменить план светофора' : 'Удалить план светофора', (tx) => tx.setNode({ ...n, tags: writePlan(n.tags, plan) }))
+  store.commit(plan ? 'Изменить план светофора' : 'Удалить план светофора', (tx) => {
+    tx.setNode({ ...n, tags: writePlan(n.tags, plan) })
+    // светофор в паре: тайминги повторяются на втором (если у него нет плана — создаём по умолчанию и синхронизируем)
+    const partner = plan ? store.doc.nodes.get(pairOf(n.tags) ?? 0) : undefined
+    if (plan && partner && partner.id !== nodeId) {
+      const base = readPlan(partner.tags) ?? defaultPlan(store.doc, partner.id, plan.cycle)
+      tx.setNode({ ...partner, tags: writePlan(partner.tags, syncTimings(plan, base)) })
+    }
+  })
+}
+
+/**
+ * Связать два светофора в пару (например, на одном пешеходном переходе): у них будут одинаковые тайминги,
+ * а правка плана одного повторится на втором. Если план есть только у одного — он копируется второму.
+ */
+export function linkSignals(store: Store, a: number, b: number) {
+  const A = store.doc.nodes.get(a), B = store.doc.nodes.get(b)
+  if (!A || !B || a === b) throw new Error('Выберите два разных светофора')
+  if (!hasSignal(A.tags) || !hasSignal(B.tags)) throw new Error('Оба узла должны быть светофорами')
+  store.commit('Связать светофоры', (tx) => {
+    // прежние пары этих узлов распадаются
+    for (const id of [a, b]) {
+      const old = store.doc.nodes.get(pairOf(store.doc.nodes.get(id)!.tags) ?? 0)
+      if (old && old.id !== a && old.id !== b) { const t = { ...old.tags }; delete t[PAIR_TAG]; tx.setNode({ ...old, tags: t }) }
+    }
+    const planA = readPlan(A.tags), planB = readPlan(B.tags)
+    const src = planA ?? planB
+    let tagsA: Tags = { ...A.tags, [PAIR_TAG]: String(b) }, tagsB: Tags = { ...B.tags, [PAIR_TAG]: String(a) }
+    if (src) {
+      // у источника — его тайминги; у второго — они же поверх его (или плана по умолчанию) состава направлений
+      const baseA = planA ?? defaultPlan(store.doc, a, src.cycle), baseB = planB ?? defaultPlan(store.doc, b, src.cycle)
+      tagsA = writePlan(tagsA, src === planA ? planA : syncTimings(src, baseA))
+      tagsB = writePlan(tagsB, src === planB ? planB : syncTimings(src, baseB))
+    }
+    tx.setNode({ ...A, tags: tagsA }); tx.setNode({ ...B, tags: tagsB })
+  })
+}
+
+export function unlinkSignals(store: Store, nodeId: number) {
+  const n = store.doc.nodes.get(nodeId)
+  const partner = store.doc.nodes.get(pairOf(n?.tags ?? {}) ?? 0)
+  if (!n) return
+  store.commit('Разорвать пару светофоров', (tx) => {
+    const t = { ...n.tags }; delete t[PAIR_TAG]; tx.setNode({ ...n, tags: t })
+    if (partner) { const p = { ...partner.tags }; delete p[PAIR_TAG]; tx.setNode({ ...partner, tags: p }) }
+  })
 }
 
 // ---------- маршруты общественного транспорта ----------

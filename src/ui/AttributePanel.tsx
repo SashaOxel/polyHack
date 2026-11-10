@@ -1,9 +1,10 @@
 import { isStopPlatform, stopsAt } from '../core/stops'
 import { StopLinkEditor } from './StopLinkEditor'
-import { SignalPlanEditor } from './SignalPlanEditor'
+import { SignalPair, SignalPlanEditor } from './SignalPlanEditor'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, featureTags, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
+import { SIGNS, readSign, removeSignTags, signTags, blocksSign, type SignKind } from '../core/signs'
 import { HIGHWAY_LABELS, hasSignal, isParkingArea, isTram, speedLimit, wayKindLabel } from '../core/roads'
 import { LevelEditor, ParkingEditor } from './StructureEditors'
 import { ROAD_TEMPLATES } from '../core/templates'
@@ -62,6 +63,7 @@ export function AttributePanel() {
       )}
 
       {stopPlatform !== undefined && <StopLinkEditor platformId={stopPlatform} />}
+      {kind === 'node' && hasSignal(el.tags) && <SignalPair nodeId={sel.id} onGo={(id) => store.select({ kind: 'node', id })} />}
       {kind === 'node' && hasSignal(el.tags) && <SignalPlanEditor nodeId={sel.id} />}
       {kind === 'way' && isParkingArea(el as OsmWay) && <ParkingEditor way={el as OsmWay} />}
       {kind === 'way' && (isTram(el as OsmWay) || !!el.tags.highway) && <LevelEditor way={el as OsmWay} />}
@@ -107,6 +109,23 @@ export function AttributePanel() {
         </>
       )}
 
+      {kind === 'node' && (
+        <>
+          <div className="sub">Знак приоритета</div>
+          <div className="row wrap">
+            {(Object.keys(SIGNS) as SignKind[]).map((k) => (
+              <button key={k} className={readSign(el.tags)?.kind === k ? 'active' : ''} disabled={blocksSign(el.tags, k)}
+                title={blocksSign(el.tags, k) ? 'На узле уже светофор или переход' : SIGNS[k].label}
+                onClick={() => apply(signTags(el.tags, k, readSign(el.tags)?.direction))}>{SIGNS[k].code} {SIGNS[k].short}</button>
+            ))}
+            {readSign(el.tags)?.direction && (
+              <button title="Знак действует для движения в другую сторону"
+                onClick={() => apply({ ...el.tags, direction: readSign(el.tags)!.direction === 'forward' ? 'backward' : 'forward' })}>⇄ Развернуть</button>
+            )}
+            {readSign(el.tags) && <button onClick={() => apply(removeSignTags(el.tags))}>Убрать знак</button>}
+          </div>
+        </>
+      )}
       {kind === 'node' && (
         <div className="row wrap">
           <button onClick={() => apply(featureTags(el.tags, 'signal'))}>Светофор</button>

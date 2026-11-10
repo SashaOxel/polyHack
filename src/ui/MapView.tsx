@@ -2,7 +2,11 @@ import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { offsetPolyline, project, unproject } from '../core/geo'
 import { Icon } from './icons'
 import { Minimap, scaleBar } from './overlays'
-import { drawCrossingIcon, drawSignalIcon } from './roadIcons'
+import { drawCrossingIcon, drawPrioritySign, drawSignalIcon } from './roadIcons'
+import { SIGNS, readSign, type SignKind } from '../core/signs'
+import { reachabilityFor } from '../core/reachability'
+import { pairOf } from '../core/signals'
+import { graphFor } from '../core/graph'
 import { drawSpeedSign } from './speedSign'
 import { GROUP_COLORS, readPlan, turnsAt } from '../core/signals'
 import type { Layers } from './layers'
@@ -12,14 +16,14 @@ import { routeUi } from './routeUi'
 import { readRoute, resolveStop, type RouteStop } from '../core/routes'
 import { linkStopToNode } from '../core/ops'
 import { isStopPlatform, linkedStop, nearestFreeRoadNode, nearestWayNode, stopsAt } from '../core/stops'
-import { drawArea, placeBusStop, drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
+import { drawArea, placeBusStop, drawRoad, placeRoadFeature, placeSign, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
 import { hasCrossing, hasSignal, isDrivable, isParkingArea, isTram, laneInfo, wayLevel, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
 import { store } from '../core/store'
 import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
 import { drawTiles, isSatelliteUrl, type View } from './tiles'
 
-export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'stop' | 'parking'
+export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'sign' | 'stop' | 'parking'
 
 interface Props {
   tileUrl: string
@@ -34,6 +38,8 @@ interface Props {
   drawTags: Tags
   /** подсказки/сообщения в строку состояния */
   onHint: (msg: string) => void
+  /** какой знак приоритета ставит инструмент «Знак» */
+  signKind: SignKind
   onStopCreated: () => void
 }
 
@@ -96,7 +102,7 @@ type Snap =
   | { kind: 'node'; id: number; lat: number; lon: number }
   | { kind: 'way'; wayId: number; lat: number; lon: number }
 
-export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags, onHint, onStopCreated }: Props) {
+export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags, onHint, signKind, onStopCreated }: Props) {
   const showNodeIds = layers.nodeIds, showPedestrian = layers.pedestrian
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -121,8 +127,8 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
   /** где показать знак скорости: точка клика по выбранной дороге */
   const signAt = useRef<{ wayId: number; lat: number; lon: number } | null>(null)
   const miniDrag = useRef(false)
-  const props = useRef({ tileUrl, issues, layers, theme, showNodeIds, showPedestrian, tool, drawTags, onHint, onStopCreated })
-  props.current = { tileUrl, issues, layers, theme, showNodeIds, showPedestrian, tool, drawTags, onHint, onStopCreated }
+  const props = useRef({ tileUrl, issues, layers, theme, showNodeIds, showPedestrian, tool, drawTags, onHint, signKind, onStopCreated })
+  props.current = { tileUrl, issues, layers, theme, showNodeIds, showPedestrian, tool, drawTags, onHint, signKind, onStopCreated }
 
   /** Перерисовать всё (сдвиг, масштаб, правка). Не чаще одного раза за кадр. */
   const redraw = () => { dirty.current.map = true; dirty.current.cars = true; schedule() }
@@ -463,6 +469,29 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       ctx.restore()
     }
 
+    // недостижимые для машин участки: цвет по причине, у края карты — бледнее (вероятно, обрезка выгрузки)
+    if (L.reach && L.car) {
+      const r = reachabilityFor(doc, store.docVersion)
+      const COLOR = { trap: '#f97316', noEntry: '#a855f7', detached: '#ef4444' } as const
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+      for (const e of graphFor(doc, store.docVersion).edges) {
+        const grp = r.edgeGroup.get(e.id)
+        if (!grp) continue
+        const pts = e.nodes.map(pos)
+        if (pts.some((p) => !p)) continue
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+        for (const p of pts) { minX = Math.min(minX, p!.x); maxX = Math.max(maxX, p!.x); minY = Math.min(minY, p!.y); maxY = Math.max(maxY, p!.y) }
+        if (maxX < -20 || minX > w + 20 || maxY < -20 || minY > h + 20) continue
+        ctx.globalAlpha = grp.border ? 0.28 : 0.7
+        ctx.strokeStyle = COLOR[grp.role]
+        ctx.lineWidth = Math.max(5, roadStyle(doc.ways.get(e.wayId)?.tags.highway).width * zoomK + 6)
+        ctx.beginPath()
+        pts.forEach((p, i) => (i ? ctx.lineTo(p!.x, p!.y) : ctx.moveTo(p!.x, p!.y)))
+        ctx.stroke()
+      }
+      ctx.globalAlpha = 1
+    }
+
     // светофоры и узлы
     const showNodes = view.current.scale > 0.5
     const used = new Set<number>()
@@ -499,8 +528,46 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
           const a = pos(way.nodes[Math.max(0, i - 1)]), b = pos(way.nodes[Math.min(way.nodes.length - 1, i + 1)])
           drawCrossingIcon(ctx, p.x, p.y, a && b ? Math.atan2(b.y - a.y, b.x - a.x) : 0, crossLen(way.tags.highway))
         }
-        if (sig) drawSignalIcon(ctx, p.x, p.y, iconSize)
+        if (sig) {
+          // пара светофоров: пунктир к «напарнику» (рисуем один раз, с узла с меньшим номером)
+          const pid = pairOf(n.tags), pp = pid !== undefined && pid > nid ? pos(pid) : null
+          if (pp) {
+            ctx.save(); ctx.setLineDash([4, 3]); ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.8
+            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(pp.x, pp.y); ctx.stroke(); ctx.restore()
+          }
+          drawSignalIcon(ctx, p.x, p.y, iconSize)
+        }
       })
+    }
+
+    // знаки приоритета: справа от дороги по ходу движения, лицом к перекрёстку
+    if (L.signs && view.current.scale >= 0.3) {
+      const sz = Math.max(14, Math.min(24, 8 * zoomK + 8))
+      const seen = new Set<number>()
+      for (const way of ways) {
+        if (!isDrivable(way) || !L.car) continue
+        const oneway = onewayDirection(way)
+        way.nodes.forEach((nid, i) => {
+          const n = doc.nodes.get(nid)
+          const sg = n && readSign(n.tags)
+          if (!n || !sg || seen.has(nid)) return
+          const p = pos(nid)
+          if (!p || p.x < -30 || p.y < -30 || p.x > w + 30 || p.y > h + 30) return
+          seen.add(nid)
+          const a = pos(way.nodes[Math.max(0, i - 1)]), b = pos(way.nodes[Math.min(way.nodes.length - 1, i + 1)])
+          let sx = p.x, sy = p.y
+          const fwd = oneway !== 0 ? oneway === 1 : sg.direction !== 'backward'
+          if (a && b && (a.x !== b.x || a.y !== b.y)) {
+            const len = Math.hypot(b.x - a.x, b.y - a.y)
+            const dx = ((fwd ? 1 : -1) * (b.x - a.x)) / len, dy = ((fwd ? 1 : -1) * (b.y - a.y)) / len
+            const off = roadStyle(way.tags.highway).width * zoomK * 0.5 + sz * 0.75
+            sx = p.x - dy * off; sy = p.y + dx * off
+            ctx.strokeStyle = 'rgba(148,163,184,0.8)'; ctx.lineWidth = 1
+            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(sx, sy); ctx.stroke()
+          }
+          drawPrioritySign(ctx, sx, sy, sg.kind, sz)
+        })
+      }
     }
 
     // проблемы
@@ -1207,6 +1274,19 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
             props.current.onHint(`${tool === 'signal' ? 'Светофор' : 'Переход'} добавлен (узел ${id}) — попадёт в .osm. Ctrl+Z — отменить`)
           } else {
             props.current.onHint('Кликните по дороге или по её узлу')
+          }
+        } else if (tool === 'sign') {
+          const s = snap(sx, sy, r.width, r.height)
+          const target = s?.kind === 'node' ? ({ kind: 'node', id: s.id } as const)
+            : s?.kind === 'way' ? ({ kind: 'way', wayId: s.wayId, lat: s.lat, lon: s.lon } as const) : null
+          if (!target) props.current.onHint('Кликните по автомобильной дороге рядом с перекрёстком')
+          else {
+            try {
+              const kind = props.current.signKind
+              const id = placeSign(store, target, kind)
+              store.select({ kind: 'node', id })
+              props.current.onHint(`Знак ${SIGNS[kind].code} «${SIGNS[kind].label}» поставлен (узел ${id}) — попадёт в .osm. Ctrl+Z — отменить`)
+            } catch (error) { props.current.onHint((error as Error).message) }
           }
         } else if (tool === 'node') {
           const s = snap(sx, sy, r.width, r.height)

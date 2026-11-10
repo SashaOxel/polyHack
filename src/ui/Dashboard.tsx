@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { networkStats } from '../core/networkStats'
 import { store } from '../core/store'
+import { ROLE_LABEL, reachabilityFor, type ReachGroup } from '../core/reachability'
 import type { Issue } from '../validate'
 import { traffic } from './trafficController'
 
@@ -97,7 +98,42 @@ function SpeedTrend() {
 }
 
 /** Обзор сети: ключевые цифры, длина по классам и по ограничению скорости, проблемы, живое движение. */
-export function Dashboard({ issues }: { issues: Issue[] }) {
+const ROLE_DOT = { trap: '#f97316', noEntry: '#a855f7', detached: '#ef4444' } as const
+
+/**
+ * Достижимость для машин: участки, куда нельзя доехать или откуда нельзя выехать. Из-за них в SUMO «машина не нашла маршрут»,
+ * а в MatSim часть спроса обрывается. Участки у края карты — скорее всего обрезка выгрузки, не ошибка.
+ */
+function Reach({ onShow, onGo }: { onShow: () => void; onGo: (g: ReachGroup) => void }) {
+  const r = reachabilityFor(store.doc, store.docVersion)
+  const real = r.groups.filter((g) => !g.border), border = r.groups.filter((g) => g.border)
+  const share = r.totalEdges ? Math.round((r.mainEdges / r.totalEdges) * 100) : 100
+  return (
+    <section className="chart reach">
+      <div className="chart-head">
+        <h4>Достижимость для машин</h4>
+        <button className="link" onClick={onShow}>Показать на карте</button>
+      </div>
+      <div className="reach-sum">В главной сети <b>{share}%</b> рёбер · вне её <b>{fmt(r.realKm)} км</b> вероятных ошибок и {fmt(r.borderKm)} км у края карты</div>
+      {real.length === 0 && <div className="note">Внутри карты недостижимых участков нет.</div>}
+      <ul className="reach-list">
+        {[...real, ...border].slice(0, 12).map((g) => {
+          const names = [...new Set(g.wayIds.map((w) => store.doc.ways.get(w)?.tags.name).filter(Boolean))].slice(0, 2).join(', ')
+          return (
+            <li key={g.id} className={g.border ? 'border' : ''} onClick={() => onGo(g)} title={ROLE_LABEL[g.role]}>
+              <i style={{ background: ROLE_DOT[g.role] }} />
+              <span className="nm">{ROLE_LABEL[g.role].split(':')[0]}{names ? ` · ${names}` : ''}
+                <small>{fmt(g.km, 2)} км{g.border ? ' · у края карты, вероятно обрезка' : ''}{g.links.length ? ` · стык: узел ${g.links.slice(0, 2).join(', ')}` : ''}</small>
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
+export function Dashboard({ issues, onShowReach, onGoReach }: { issues: Issue[]; onShowReach: () => void; onGoReach: (g: ReachGroup) => void }) {
   useSyncExternalStore(store.subscribe, store.getVersion)
   const s = useMemo(() => networkStats(store.doc), [store.docVersion]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!store.doc.nodes.size) return <div className="hint">Откройте файл — здесь появится обзор сети.</div>
@@ -119,6 +155,7 @@ export function Dashboard({ issues }: { issues: Issue[] }) {
         <span className={warns ? 'status warn' : 'status ok'}>{warns ? '!' : '✓'} предупреждений {warns}</span>
       </div>
 
+      <Reach onShow={onShowReach} onGo={onGoReach} />
       <SpeedTrend />
       <Bars title="Длина по классам дорог, км" rows={s.byClass} unit="км" />
       <Bars title="Длина по ограничению скорости, км" rows={s.bySpeed} unit="км" muted="unset" />

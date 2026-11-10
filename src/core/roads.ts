@@ -64,6 +64,21 @@ export const SUMO_DEFAULT_KMH: Record<string, number> = {
 /** Скорости по зонам OSM (maxspeed=RU:urban). Другие страны не известны — вернётся null. */
 const ZONE_KMH: Record<string, number> = { 'RU:urban': 60, 'RU:rural': 90, 'RU:motorway': 110, 'RU:living_street': 20 }
 
+/** Теги ограничения скорости на дороге. */
+export const MAXSPEED_KEYS = ['maxspeed', 'maxspeed:forward', 'maxspeed:backward'] as const
+
+/**
+ * Числовая запись скорости для значения, которое SUMO/MATSim/Webots могут не понять: зоны (RU:urban → 60) и «60 km/h» → 60.
+ * undefined — значение уже число (или не распознано и менять нечего).
+ */
+export function normalizedMaxspeed(v: string | undefined): string | undefined {
+  if (v === undefined) return undefined
+  const t = v.trim()
+  if (t in ZONE_KMH) return String(ZONE_KMH[t])
+  const m = /^(\d+(?:\.\d+)?)\s*km\/h$/.exec(t)
+  return m ? m[1] : undefined
+}
+
 function parseSpeed(v: string | undefined): { kmh: number | null; zone: boolean } | undefined {
   if (v === undefined) return undefined
   const t = v.trim()

@@ -208,6 +208,24 @@ export function defaultPlan(doc: OsmDocument, nodeId: number, cycle = 60): Signa
   return { cycle, offset: 0, yellow, intergreen, groups }
 }
 
+// ---------- пара светофоров ----------
+
+/**
+ * Два светофора, работающие синхронно (например, два светофора на одном пешеходном переходе через разделённую дорогу):
+ * на обоих узлах тег polyhack:signal_pair=<номер второго>. Вне префикса плана, чтобы запись плана его не стирала.
+ * У пары общие тайминги (цикл, сдвиг, жёлтый, межзелёный, время зелёного групп по порядку); состав направлений у каждого свой.
+ */
+export const PAIR_TAG = 'polyhack:signal_pair'
+export const pairOf = (t: Tags): number | undefined => { const n = Number(t[PAIR_TAG]); return Number.isSafeInteger(n) && n !== 0 ? n : undefined }
+
+/** Перенести тайминги с одного плана на другой: цикл, сдвиг, жёлтый, межзелёный и start/end групп по порядку. */
+export function syncTimings(from: SignalPlan, to: SignalPlan): SignalPlan {
+  const out = structuredClone(to)
+  out.cycle = from.cycle; out.offset = from.offset; out.yellow = from.yellow; out.intergreen = from.intergreen
+  out.groups.forEach((g, i) => { const f = from.groups[i]; if (f) { g.start = f.start; g.end = f.end } })
+  return out
+}
+
 // ---------- расчёты и проверки ----------
 
 /** Длительность зелёного, с (интервал может переходить через конец цикла). */
