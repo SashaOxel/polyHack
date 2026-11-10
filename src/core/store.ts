@@ -1,5 +1,7 @@
 import type { ElementRef, OsmDocument, OsmNode, OsmRelation, OsmWay } from './types'
 import { emptyDocument } from './types'
+import { createIdGenerator, positiveIds } from './ids'
+import { splitRoadSegments } from './segments'
 
 /**
  * Хранилище документа с undo/redo.
@@ -30,7 +32,7 @@ export class Tx {
   readonly changes: Change[] = []
   constructor(private doc: OsmDocument, private nextId: () => number) {}
 
-  /** Новый отрицательный id для созданных объектов (как в JOSM). */
+  /** Уникальный положительный номер нового объекта. */
   newId(): number {
     return this.nextId()
   }
@@ -63,6 +65,8 @@ export class Tx {
 export type Listener = () => void
 
 export class Store {
+  constructor(private readonly options: { autoSplitRoads?: boolean } = {}) {}
+
   doc: OsmDocument = emptyDocument()
   /** Растёт при любом изменении — по нему React/Canvas понимают, что надо перерисоваться. */
   version = 0
@@ -75,7 +79,7 @@ export class Store {
   private undoStack: Entry[] = []
   private redoStack: Entry[] = []
   private listeners = new Set<Listener>()
-  private idCounter = 0
+  private nextId = createIdGenerator(this.doc)
 
   subscribe = (fn: Listener) => {
     this.listeners.add(fn)
@@ -89,13 +93,18 @@ export class Store {
   }
 
   load(doc: OsmDocument, fileName: string) {
-    this.doc = doc
+    this.nextId = createIdGenerator(doc)
+    const prepared = positiveIds(doc, this.nextId)
+    this.doc = this.options.autoSplitRoads ? {
+      ...prepared, nodes: new Map(prepared.nodes), ways: new Map(prepared.ways), relations: new Map(prepared.relations),
+    } : prepared
+    const tx = new Tx(this.doc, this.nextId)
+    if (this.options.autoSplitRoads) splitRoadSegments(this.doc, tx)
     this.fileName = fileName
     this.undoStack = []
     this.redoStack = []
     this.selection = null
-    this.dirty = false
-    this.idCounter = 0
+    this.dirty = prepared !== doc || tx.changes.length > 0
     this.docVersion++
     this.emit()
   }
@@ -106,8 +115,14 @@ export class Store {
   }
 
   commit(label: string, fn: (tx: Tx) => void) {
-    const tx = new Tx(this.doc, () => --this.idCounter)
-    fn(tx)
+    const tx = new Tx(this.doc, this.nextId)
+    try {
+      fn(tx)
+      if (this.options.autoSplitRoads) splitRoadSegments(this.doc, tx)
+    } catch (error) {
+      this.apply(tx.changes, 'undo')
+      throw error
+    }
     if (!tx.changes.length) return
     this.undoStack.push({ label, changes: tx.changes })
     this.redoStack = []
@@ -161,4 +176,4 @@ export class Store {
   get lastLabel() { return this.undoStack.at(-1)?.label }
 }
 
-export const store = new Store()
+export const store = new Store({ autoSplitRoads: true })

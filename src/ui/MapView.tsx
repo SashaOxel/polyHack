@@ -4,18 +4,20 @@ import { Icon } from './icons'
 import { Minimap, scaleBar } from './overlays'
 import { drawCrossingIcon, drawSignalIcon } from './roadIcons'
 import { drawSpeedSign } from './speedSign'
-import { drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
+import { linkedStop } from '../core/stops'
+import { placeBusStop, drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
 import { hasCrossing, hasSignal, isDrivable, laneInfo, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
 import { store } from '../core/store'
 import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
 import { drawTiles, type View } from './tiles'
 
-export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing'
+export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'stop'
 
 interface Props {
   tileUrl: string
   issues: Issue[]
+  showNodeIds: boolean
   showPedestrian: boolean
   focus: { lat: number; lon: number; n: number } | null
   tool: Tool
@@ -23,6 +25,7 @@ interface Props {
   drawTags: Tags
   /** подсказки/сообщения в строку состояния */
   onHint: (msg: string) => void
+  onStopCreated: () => void
 }
 
 const HIT = 8
@@ -32,12 +35,13 @@ type Snap =
   | { kind: 'node'; id: number; lat: number; lon: number }
   | { kind: 'way'; wayId: number; lat: number; lon: number }
 
-export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags, onHint }: Props) {
+export function MapView({ tileUrl, issues, showNodeIds, showPedestrian, focus, tool, drawTags, onHint, onStopCreated }: Props) {
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
   const canvas = useRef<HTMLCanvasElement>(null)
   const view = useRef<View>({ cx: 0, cy: 0, scale: 0.1 })
   const drag = useRef<null | { kind: 'pan' | 'node'; id?: number; sx: number; sy: number; moved: boolean }>(null)
   const dragPos = useRef<{ id: number; lat: number; lon: number } | null>(null)
+  const stopAnchor = useRef<Snap | null>(null)
   const draft = useRef<DrawPoint[]>([])
   const hover = useRef<{ x: number; y: number; snap: Snap | null } | null>(null)
   const raf = useRef(0)
@@ -52,8 +56,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
   /** где показать знак скорости: точка клика по выбранной дороге */
   const signAt = useRef<{ wayId: number; lat: number; lon: number } | null>(null)
   const miniDrag = useRef(false)
-  const props = useRef({ tileUrl, issues, showPedestrian, tool, drawTags, onHint })
-  props.current = { tileUrl, issues, showPedestrian, tool, drawTags, onHint }
+  const props = useRef({ tileUrl, issues, showNodeIds, showPedestrian, tool, drawTags, onHint, onStopCreated })
+  props.current = { tileUrl, issues, showNodeIds, showPedestrian, tool, drawTags, onHint, onStopCreated }
 
   const redraw = () => {
     cancelAnimationFrame(raf.current)
@@ -329,6 +333,47 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       }
     }
 
+    // Остановка связана с дорожной сетью через опорный узел.
+    for (const relation of doc.relations.values()) {
+      const stop = linkedStop(relation)
+      if (!stop) continue
+      const anchor = pos(stop.anchor), platform = pos(stop.platform)
+      if (!anchor || !platform) continue
+      ctx.save()
+      ctx.strokeStyle = '#155aa8'
+      ctx.lineWidth = 2
+      ctx.setLineDash([3, 3])
+      ctx.beginPath(); ctx.moveTo(anchor.x, anchor.y); ctx.lineTo(platform.x, platform.y); ctx.stroke()
+      ctx.fillStyle = '#155aa8'
+      ctx.fillRect(platform.x - 10, platform.y - 10, 20, 20)
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'
+      ctx.fillText('А', platform.x, platform.y + 4)
+      ctx.restore()
+    }
+    if (tool === 'stop' && stopAnchor.current) {
+      const anchor = stopAnchor.current
+      const p = toScreen(anchor.lat, anchor.lon, w, h)
+      ctx.strokeStyle = '#155aa8'; ctx.lineWidth = 3
+      ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.stroke()
+    }
+    if (props.current.showNodeIds) {
+      ctx.save()
+      ctx.font = '11px system-ui'
+      const occupied = new Set<string>()
+      for (const node of doc.nodes.values()) {
+        const p = pos(node.id)!
+        if (p.x < 0 || p.x > w || p.y < 0 || p.y > h) continue
+        ctx.fillStyle = '#315679'
+        ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3)
+        const cell = Math.floor(p.x / 96) + ',' + Math.floor(p.y / 20)
+        if (occupied.has(cell) && sel?.id !== node.id) continue
+        occupied.add(cell)
+        const label = String(node.id)
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 3
+        ctx.strokeText(label, p.x + 5, p.y - 4); ctx.fillText(label, p.x + 5, p.y - 4)
+      }
+      ctx.restore()
+    }
     // выделение
     if (sel?.kind === 'way') {
       const way = doc.ways.get(sel.id)
@@ -367,6 +412,16 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
   // ----- поиск объекта под курсором -----
   function pick(sx: number, sy: number, w: number, h: number) {
     const doc = store.doc
+    // The visible stop marker takes priority over the road and its anchor.
+    for (const relation of doc.relations.values()) {
+      const stop = linkedStop(relation)
+      const platform = stop && doc.nodes.get(stop.platform)
+      if (!platform) continue
+      const point = toScreen(platform.lat, platform.lon, w, h)
+      if (Math.abs(point.x - sx) <= 12 && Math.abs(point.y - sy) <= 12) {
+        return { kind: 'node' as const, id: platform.id }
+      }
+    }
     const ped = props.current.showPedestrian
     let bestN: { id: number; d: number } | null = null
     let bestW: { id: number; d: number; x: number; y: number } | null = null
@@ -394,6 +449,12 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
         prev = p
       }
     }
+    for (const n of doc.nodes.values()) {
+      if (!props.current.showNodeIds && n.tags.public_transport !== 'platform' && n.tags.public_transport !== 'stop_position') continue
+      const p = toScreen(n.lat, n.lon, w, h)
+      const d = Math.hypot(p.x - sx, p.y - sy)
+      if (d < HIT && (!bestN || d < bestN.d)) bestN = { id: n.id, d }
+    }
     if (bestN) return { kind: 'node' as const, id: bestN.id }
     if (bestW) return { kind: 'way' as const, id: bestW.id, at: fromScreen(bestW.x, bestW.y, w, h) }
     return null
@@ -407,7 +468,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     let bestN: { id: number; d: number } | null = null
     let bestS: { wayId: number; d: number; x: number; y: number } | null = null
     for (const way of doc.ways.values()) {
-      if (!way.tags.highway) continue
+      if (!way.tags.highway || (props.current.tool === 'stop' && !isDrivable(way))) continue
       if (!isDrivable(way) && !ped) continue
       let prev: { x: number; y: number } | null = null
       for (const nid of way.nodes) {
@@ -491,7 +552,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       const sx = e.clientX - r.left, sy = e.clientY - r.top
       const hit = props.current.tool === 'select' ? pick(sx, sy, r.width, r.height) : null
       try { c.setPointerCapture(e.pointerId) } catch { /* синтетические события без активного указателя */ }
-      if (hit?.kind === 'node' && store.selection?.kind === 'node' && store.selection.id === hit.id) {
+      if (hit?.kind === 'node') {
+        store.select({ kind: 'node', id: hit.id })
         drag.current = { kind: 'node', id: hit.id, sx, sy, moved: false }
       } else {
         drag.current = { kind: 'pan', sx, sy, moved: false }
@@ -540,7 +602,8 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
         dragPos.current = null
         // отпустили над другим узлом — склеиваем (так соединяют разорванные перекрёстки)
         const target = snap(sx, sy, r.width, r.height, p.id)
-        if (target?.kind === 'node') {
+        const platform = store.doc.nodes.get(p.id)?.tags.public_transport === 'platform'
+        if (!platform && target?.kind === 'node') {
           mergeNodes(store, target.id, p.id)
           store.select({ kind: 'node', id: target.id })
           props.current.onHint('Узлы склеены. Ctrl+Z — отменить')
@@ -556,6 +619,23 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
           store.select(hit ? { kind: hit.kind, id: hit.id } : null)
         } else if (tool === 'draw') {
           addDraftPoint(sx, sy, r.width, r.height)
+        } else if (tool === 'stop') {
+          const anchor = stopAnchor.current
+          if (!anchor) {
+            stopAnchor.current = snap(sx, sy, r.width, r.height)
+            props.current.onHint(stopAnchor.current ? 'Теперь кликните по месту посадки пассажиров рядом с дорогой' : 'Выберите автомобильную дорогу')
+          } else {
+            try {
+              const id = placeBusStop(store, anchor, fromScreen(sx, sy, r.width, r.height))
+              store.select({ kind: 'node', id })
+              props.current.onHint('Остановка создана · опорный узел № ' + id)
+              props.current.onStopCreated()
+            } catch (error) {
+              props.current.onHint((error as Error).message)
+            }
+            stopAnchor.current = null
+          }
+          redraw()
         } else if (tool === 'signal' || tool === 'crossing') {
           // клик по узлу — тег на этом узле, клик по отрезку дороги — новый узел с тегом; это обычная правка OSM
           const s = snap(sx, sy, r.width, r.height)
@@ -595,6 +675,12 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     c.addEventListener('pointerdown', onDown)
     c.addEventListener('pointermove', onMove)
     c.addEventListener('pointerup', onUp)
+    const cancelDrag = () => {
+      drag.current = null
+      dragPos.current = null
+      redraw()
+    }
+    c.addEventListener('pointercancel', cancelDrag)
     c.addEventListener('wheel', onWheel, { passive: false })
     const ro = new ResizeObserver(() => {
       if (fitPending.current && fit()) { fitPending.current = false; lastFile.current = store.fileName }
@@ -605,6 +691,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
       c.removeEventListener('pointerdown', onDown)
       c.removeEventListener('pointermove', onMove)
       c.removeEventListener('pointerup', onUp)
+      c.removeEventListener('pointercancel', cancelDrag)
       c.removeEventListener('wheel', onWheel)
       ro.disconnect()
     }
@@ -621,7 +708,7 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     }
     redraw()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version, tileUrl, issues, showPedestrian])
+  }, [version, tileUrl, issues, showPedestrian, showNodeIds])
 
   // переход к проблеме
   useEffect(() => {
@@ -631,6 +718,20 @@ export function MapView({ tileUrl, issues, showPedestrian, focus, tool, drawTags
     redraw()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus])
+
+  useEffect(() => {
+    stopAnchor.current = null
+    if (tool !== 'stop') return
+    const cancel = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        stopAnchor.current = null
+        props.current.onHint('Выберите узел на дороге')
+        redraw()
+      }
+    }
+    window.addEventListener('keydown', cancel)
+    return () => window.removeEventListener('keydown', cancel)
+  }, [tool, store.doc, store.docVersion])
 
   // смена инструмента: сбрасываем незаконченную дорогу; в режиме рисования работают Enter / Esc / Backspace
   useEffect(() => {

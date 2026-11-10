@@ -221,3 +221,5 @@ footer .keys { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; o
 .note.strong { color: var(--text); font-weight: 600; }
 
 .palette button kbd { font-size: 8px; }
+
+.stop-details { display: grid; gap: 4px; padding: 10px; margin-bottom: 12px; border-radius: 6px; background: var(--accent-soft); }

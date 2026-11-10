@@ -22,6 +22,7 @@ export function App() {
   const [tiles, setTiles] = useState(true)
   const [tileUrl, setTileUrl] = useState(DEFAULT_TILE_URL)
   const [showPed, setShowPed] = useState(true)
+  const [showNodeIds, setShowNodeIds] = useState(false)
   const [onlyRoads, setOnlyRoads] = useState(true)
   const [withPed, setWithPed] = useState(false)
   const [keepMeta, setKeepMeta] = useState(false)
@@ -41,7 +42,8 @@ export function App() {
       const doc = parseOsm(text)
       store.load(doc, name)
       setIgnored(new Set())
-      setStatus(`${name}: ${doc.nodes.size} узлов, ${doc.ways.size} путей, ${doc.relations.size} relations (${Math.round(performance.now() - t0)} мс)`)
+      const segments = [...store.doc.ways.values()].filter(way => way.tags.highway && way.tags.area !== 'yes').length
+      setStatus(`${name}: ${store.doc.nodes.size} узлов, ${segments} отрезков дорог (${Math.round(performance.now() - t0)} мс)`)
     } catch (e) {
       setStatus('Ошибка чтения файла: ' + (e as Error).message)
     }
@@ -62,7 +64,7 @@ export function App() {
     if (!store.doc.nodes.size) return
     const t = setTimeout(() => setIssues(validate(store.doc)), 300)
     return () => clearTimeout(t)
-  }, [version])
+  }, [store.docVersion])
 
   const save = useCallback(() => {
     if (!store.doc.nodes.size) return
@@ -104,6 +106,7 @@ export function App() {
       else if (key === '3') { setMode('3d'); setTool('select') }
       else if (key === 'v') setTool('select')
       else if (key === 'd' && mode === '2d') setTool('draw')
+      else if (key === 'b' && mode === '2d') setTool('stop')
       else if (key === 'n' && mode === '2d') setTool('node')
       else if (key === 't' && mode === '2d') setTool('signal')
       else if (key === 'c' && mode === '2d') setTool('crossing')
@@ -168,6 +171,7 @@ export function App() {
     { id: 'draw', icon: 'road', label: 'Дорога', key: 'D' },
     { id: 'node', icon: 'node', label: 'Узел на дороге', key: 'N' },
     { id: 'signal', icon: 'signal', label: 'Светофор', key: 'T' },
+    { id: 'stop', icon: 'bus', label: 'Автобусная остановка', key: 'B' },
     { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход', key: 'C' },
   ]
 
@@ -206,6 +210,7 @@ export function App() {
         <details className="menu">
           <summary><Icon name="layers" /> Вид <Icon name="chevron" size={14} /></summary>
           <div className="popover">
+            <label><input type="checkbox" checked={showNodeIds} onChange={e => setShowNodeIds(e.target.checked)} /> Номера узлов</label>
             <label><input type="checkbox" checked={showPed} onChange={(e) => setShowPed(e.target.checked)} /> Пешеходные дорожки</label>
             <label><input type="checkbox" checked={tiles} onChange={(e) => setTiles(e.target.checked)} /> Подложка (карта)</label>
             <div className="field">
@@ -230,7 +235,8 @@ export function App() {
           <div className="layer" style={{ display: mode === '2d' ? 'block' : 'none' }}>
             <MapView
               tileUrl={tiles ? tileUrl : ''} issues={issues} showPedestrian={showPed} focus={focus}
-              tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+              showNodeIds={showNodeIds} tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+              onStopCreated={() => setTool('select')}
             />
           </div>
           {mode === '3d' && loaded && (
@@ -241,7 +247,7 @@ export function App() {
 
           {mode === '2d' && <div className="palette">
             {TOOLS.map((t) => (
-              <button key={t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label} (${t.key})`}>
+              <button key={t.id} aria-label={t.label} aria-pressed={tool === t.id} className={tool === t.id ? 'active' : ''} onClick={() => setTool(t.id)} title={`${t.label} (${t.key})`}>
                 <Icon name={t.icon} size={20} />
                 <kbd>{t.key}</kbd>
               </button>
@@ -267,6 +273,9 @@ export function App() {
               <b>{tool === 'signal' ? 'Светофор' : 'Пешеходный переход'}</b>
               <span>Клик по дороге: на ней появится узел с тегом {tool === 'signal' ? 'highway=traffic_signals' : 'highway=crossing'} — это попадёт в .osm</span>
             </div>
+          )}
+          {mode === '2d' && tool === 'stop' && (
+            <div className="tool-card"><b>Автобусная остановка</b><span>1. Выберите узел на дороге. 2. Укажите место посадки рядом. Esc — отмена.</span></div>
           )}
           {mode === '2d' && tool === 'node' && (
             <div className="tool-card"><b>Узел на дороге</b><span>Кликните по дороге, чтобы поставить на неё узел</span></div>

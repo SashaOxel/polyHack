@@ -1,3 +1,4 @@
+import { linkedStop } from './stops'
 import { DRIVABLE, PEDESTRIAN } from './roads'
 import type { Meta, OsmDocument, OsmNode, OsmRelation, OsmWay, Tags } from './types'
 
@@ -38,13 +39,19 @@ export function selectForExport(doc: OsmDocument, opts: ExportOptions) {
     }
   }
   const wayIds = new Set(ways.map((w) => w.id))
-  const nodes = [...used].map((id) => doc.nodes.get(id)).filter((n): n is OsmNode => !!n)
   const relations: OsmRelation[] = []
   for (const r of doc.relations.values()) {
+    const stop = linkedStop(r)
+    if (stop && used.has(stop.anchor) && doc.nodes.has(stop.platform)) {
+      used.add(stop.platform)
+      relations.push(r)
+      continue
+    }
     if (r.tags.type !== 'restriction') continue
     const ok = r.members.every((m) => (m.type === 'way' ? wayIds.has(m.ref) : m.type === 'node' ? used.has(m.ref) : false))
     if (ok) relations.push(r)
   }
+  const nodes = [...used].map(id => doc.nodes.get(id)).filter((n): n is OsmNode => !!n)
   return { nodes, ways, relations }
 }
 

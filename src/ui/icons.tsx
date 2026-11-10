@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 /** Небольшой набор линейных иконок (24×24, штрих currentColor). */
 const paths: Record<string, ReactNode> = {
   select: <path d="M5 3l14 7-6 2-2 6L5 3z" />,
+  bus: <><rect x="4" y="3" width="16" height="15" rx="3" /><path d="M4 11h16M7 18v3m10-3v3M8 14h1m6 0h1" /></>,
   road: <><path d="M4 20L10 4M20 20L14 4" /><path d="M12 6v3M12 12v3M12 18v2" /></>,
   node: <><circle cx="12" cy="12" r="3" /><path d="M3 12h6M15 12h6" /></>,
   undo: <><path d="M9 14L4 9l5-5" /><path d="M4 9h9a6 6 0 010 12h-3" /></>,

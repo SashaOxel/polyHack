@@ -1,3 +1,4 @@
+import { stopsAt } from '../core/stops'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, featureTags, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
@@ -27,6 +28,7 @@ export function AttributePanel() {
   useSyncExternalStore(store.subscribe, store.getVersion)
   const sel = store.selection
   const el = sel?.kind === 'way' ? store.doc.ways.get(sel.id) : sel?.kind === 'node' ? store.doc.nodes.get(sel.id) : undefined
+  const selectedStops = sel?.kind === 'node' ? stopsAt(store.doc, sel.id) : []
   const [rows, setRows] = useState<[string, string][]>([])
 
   useEffect(() => {
@@ -45,8 +47,19 @@ export function AttributePanel() {
 
   return (
     <div className="panel-body">
-      <h3>{kind === 'way' ? 'Дорога' : 'Узел'} {sel.id}</h3>
+      <h3>{selectedStops.length ? 'Остановка · опорный узел № ' + selectedStops[0].anchor :
+        (kind === 'way' ? 'Отрезок дороги ' : 'Узел ') + sel.id}</h3>
+      {kind === 'way' && 'nodes' in el && el.nodes.length === 2 && (
+        <div className="note">Границы отрезка · узлы {el.nodes[0]} и {el.nodes[1]}</div>
+      )}
 
+      {selectedStops.map(stop => (
+        <div className="stop-details" key={stop.area}>
+          <strong>Автобусная остановка</strong>
+          <div>Пункт остановки · опорный узел № {stop.anchor}</div>
+          <div>Потяните значок остановки, чтобы переместить место посадки.</div>
+        </div>
+      ))}
       {kind === 'way' && (
         <>
           <div className="row">

@@ -110,7 +110,7 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
     const osm = join(dir, 'drawn.osm')
     writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
     execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'out.net.xml')], { stdio: 'pipe' })
-    // SUMO называет рёбра по id дороги; новая дорога имеет отрицательный id
+    // SUMO называет рёбра по id дороги.
     expect(readFileSync(join(dir, 'out.net.xml'), 'utf8')).toContain(`id="${id}`)
   }, 60000)
 })

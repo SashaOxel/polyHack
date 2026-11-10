@@ -33,7 +33,7 @@ describe('drawRoad', () => {
     const id = drawRoad(s, [
       { kind: 'new', lat: 52.01, lon: 104.0 }, { kind: 'new', lat: 52.01, lon: 104.002 },
     ], { highway: 'service' })
-    expect(id).toBeLessThan(0)
+    expect(id).toBeGreaterThan(0)
     expect(s.doc.ways.get(id)!.nodes).toHaveLength(2)
     expect(s.doc.nodes.size).toBe(7)
     s.undo()
@@ -182,7 +182,7 @@ describe('светофоры и пешеходные переходы — это
     const s = plus()
     const nodesBefore = s.doc.nodes.size
     const id = placeRoadFeature(s, { kind: 'way', wayId: 1, lat: 52.0, lon: 104.0005 }, 'signal')
-    expect(id).toBeLessThan(0)
+    expect(id).toBeGreaterThan(0)
     expect(s.doc.nodes.size).toBe(nodesBefore + 1)
     expect(s.doc.nodes.get(id)!.tags.highway).toBe('traffic_signals')
     expect(s.doc.ways.get(1)!.nodes).toContain(id)

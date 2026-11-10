@@ -1,3 +1,5 @@
+import { stopsAt } from './stops'
+import { isDrivable } from './roads'
 import { cumulativeDistance } from './elevation'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
@@ -60,7 +62,15 @@ function insertIntoWay(tx: Tx, doc: OsmDocument, wayId: number, lat: number, lon
 export function moveNode(store: Store, id: number, lat: number, lon: number) {
   const n = store.doc.nodes.get(id)
   if (!n) return
-  store.commit('Переместить узел', (tx) => tx.setNode({ ...n, lat, lon }))
+  store.commit('Переместить узел', tx => {
+    for (const stop of stopsAt(store.doc, id)) {
+      const platform = store.doc.nodes.get(stop.platform)
+      if (stop.anchor === id && platform) {
+        tx.setNode({ ...platform, lat: platform.lat + lat - n.lat, lon: platform.lon + lon - n.lon })
+      }
+    }
+    tx.setNode({ ...n, lat, lon })
+  })
 }
 
 /** Заменить теги целиком (для узла или way). Пустое значение удаляет ключ. */
@@ -262,6 +272,14 @@ export function deleteNode(store: Store, id: number) {
   if (!store.doc.nodes.has(id)) return
   store.commit('Удалить узел', (tx) => {
     const doc = store.doc
+    for (const stop of stopsAt(doc, id)) {
+      tx.deleteRelation(stop.area)
+      if (stop.anchor === id) {
+        const shared = [...doc.ways.values()].some(w => w.nodes.includes(stop.platform)) ||
+          [...doc.relations.values()].some(r => r.members.some(m => m.type === 'node' && m.ref === stop.platform))
+        if (!shared) tx.deleteNode(stop.platform)
+      }
+    }
     for (const w of [...doc.ways.values()]) {
       if (!w.nodes.includes(id)) continue
       const nodes = dedupe(w.nodes.filter((n) => n !== id))
@@ -339,4 +357,33 @@ export function placeRoadFeature(store: Store, target: FeatureTarget, feature: R
     if (n) tx.setNode({ ...n, tags: featureTags(n.tags, feature) })
   })
   return nodeId
+}
+
+/** One transaction creates the position, boarding platform and enclosing stop area. */
+export function placeBusStop(store: Store, target: FeatureTarget, platform: { lat: number; lon: number }) {
+  const doc = store.doc
+  const road = target.kind === 'way' ? doc.ways.get(target.wayId) :
+    [...doc.ways.values()].find(w => isDrivable(w) && w.nodes.includes(target.id))
+  if (!road || !isDrivable(road)) throw new Error('Выберите узел или участок автомобильной дороги')
+  if (target.kind === 'node') {
+    const node = doc.nodes.get(target.id)
+    if (!node) throw new Error('Узел отсутствует на карте')
+    if (stopsAt(doc, target.id).length) throw new Error('К этому узлу уже привязана остановка')
+    if (node.tags.public_transport && node.tags.public_transport !== 'stop_position') {
+      throw new Error('У этого узла уже есть другое транспортное назначение')
+    }
+  }
+  let anchor = 0
+  store.commit('Добавить автобусную остановку', tx => {
+    anchor = target.kind === 'node' ? target.id : insertIntoWay(tx, doc, target.wayId, target.lat, target.lon)
+    const node = doc.nodes.get(anchor)!
+    tx.setNode({ ...node, tags: { ...node.tags, public_transport: 'stop_position', bus: 'yes' } })
+    const platformId = tx.newId()
+    tx.setNode({ id: platformId, ...platform, meta: {}, tags: { highway: 'bus_stop', public_transport: 'platform', bus: 'yes' } })
+    tx.setRelation({
+      id: tx.newId(), meta: {}, tags: { type: 'public_transport', public_transport: 'stop_area', 'polyhack:linked': 'yes' },
+      members: [{ type: 'node', ref: anchor, role: 'stop' }, { type: 'node', ref: platformId, role: 'platform' }],
+    })
+  })
+  return anchor
 }
