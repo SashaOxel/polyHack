@@ -90,6 +90,12 @@ describe('3D-сцена', () => {
     expect(roadWidth({ id: 1, nodes: [], meta: {}, tags: { highway: 'primary', lanes: '3' } })).toBeCloseTo(9.6, 5)
   })
 
+  it('мосты: и автомобильный, и пешеходные (надземные переходы) получают настил', () => {
+    const withPed = buildScene(doc, { ...opts, pedestrian: true })
+    expect(withPed.stats.bridges).toBe(10) // в файле 1 автомобильный и 9 пешеходных мостов
+    expect(buildScene(doc, opts).stats.bridges).toBe(1) // без пешеходных — только автомобильный
+  })
+
   it('без зданий и без пешеходных — легче', () => {
     const a = buildScene(doc, { ...opts, buildings: false })
     expect(a.stats.buildings).toBe(0)

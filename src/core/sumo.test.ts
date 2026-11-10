@@ -6,8 +6,11 @@ import { describe, expect, it } from 'vitest'
 import { buildGraph } from './graph'
 import { defaultPlan, turnsAt } from './signals'
 import { buildSumoSignals } from './sumoSignals'
+import { resolveStop } from './routes'
+import { validate } from '../validate'
+import { applyFix } from '../validate/fixes'
 import { setSignalPlan } from './ops'
-import { drawRoad, moveNode, placeRoadFeature, reverseWay, setElevationRamp } from './ops'
+import { drawRoad, moveNode, placeRoadFeature, reverseWay, saveRoute, setElevationRamp } from './ops'
 import { parseOsm } from './parse'
 import { isDrivable } from './roads'
 import { serializeOsm } from './serialize'
@@ -126,6 +129,29 @@ describe.skipIf(!netconvert)('сохранённый файл проходит �
     const sumo = join(netconvert!, '..', 'sumo')
     execFileSync(sumo, ['-n', net, '-a', add, '--end', '140', '--no-step-log', '--error-log', join(dir, 'err.log')], { stdio: 'pipe' })
     expect(readFileSync(join(dir, 'err.log'), 'utf8').trim()).toBe('')
+  }, 120000)
+
+  it('маршрут автобуса попадает в линии общественного транспорта SUMO', () => {
+    const s = new Store()
+    s.load(parseOsm(readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')), 'example.osm')
+    // привязываем остановки из файла к ближайшим узлам дорог (автоисправление проверки)
+    for (const i of validate(s.doc).filter((x) => x.code === 'unlinked-stop' && x.fix)) applyFix(s, i.fix!)
+    const linked = [...s.doc.relations.values()].filter((r) => r.tags['polyhack:linked'] === 'yes')
+      .map((r) => resolveStop(s.doc, r.members[0].ref, 'bus')!)
+    // ищем пару остановок, между которыми есть путь
+    let id: number | undefined
+    for (let i = 0; i < linked.length && id === undefined; i++) for (let j = 0; j < linked.length && id === undefined; j++) {
+      if (i === j) continue
+      try { id = saveRoute(s, { kind: 'bus', ref: '80', stops: [linked[i], linked[j]] }) } catch { /* нет пути — следующая пара */ }
+    }
+    expect(id).toBeDefined()
+    const dir = mkdtempSync(join(tmpdir(), 'uds-pt-'))
+    const osm = join(dir, 'pt.osm')
+    writeFileSync(osm, serializeOsm(s.doc, { onlyRoads: true, keepMeta: false }))
+    execFileSync(netconvert!, ['--osm-files', osm, '-o', join(dir, 'n.xml'), '--ptstop-output', join(dir, 'stops.xml'), '--ptline-output', join(dir, 'lines.xml')], { stdio: 'pipe' })
+    const lines = readFileSync(join(dir, 'lines.xml'), 'utf8')
+    expect(lines).toMatch(/<ptLine [^>]*line="80"/)
+    expect(lines).toContain('type="bus"')
   }, 120000)
 
   it('файл с высотами (тег ele) проходит через SUMO', () => {

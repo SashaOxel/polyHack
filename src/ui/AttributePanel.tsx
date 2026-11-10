@@ -4,7 +4,8 @@ import { SignalPlanEditor } from './SignalPlanEditor'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { deleteNode, deleteWay, featureTags, reverseWay, setTags, splitAtNode } from '../core/ops'
 import { store } from '../core/store'
-import { HIGHWAY_LABELS, hasSignal, isTram, speedLimit, wayKindLabel } from '../core/roads'
+import { HIGHWAY_LABELS, hasSignal, isParkingArea, isTram, speedLimit, wayKindLabel } from '../core/roads'
+import { LevelEditor, ParkingEditor } from './StructureEditors'
 import { ROAD_TEMPLATES } from '../core/templates'
 import type { OsmWay, Tags } from '../core/types'
 import { ElevationEditor } from './ElevationEditor'
@@ -55,17 +56,19 @@ export function AttributePanel() {
     <div className="panel-body">
       <h3>{stopPlatform !== undefined ? `Остановка${el.tags.name ? ' «' + el.tags.name + '»' : ''} · узел № ${sel.id}`
         : selectedStops.length ? 'Опорный узел остановки № ' + sel.id
-        : kind === 'way' ? `${wayKindLabel(el as OsmWay)} · отрезок № ${sel.id}` : 'Узел № ' + sel.id}</h3>
+        : kind === 'way' ? `${wayKindLabel(el as OsmWay)} · ${isParkingArea(el as OsmWay) ? '' : 'отрезок '}№ ${sel.id}` : 'Узел № ' + sel.id}</h3>
       {kind === 'way' && 'nodes' in el && el.nodes.length === 2 && (
         <div className="note">Границы отрезка · узлы {el.nodes[0]} и {el.nodes[1]}</div>
       )}
 
       {stopPlatform !== undefined && <StopLinkEditor platformId={stopPlatform} />}
       {kind === 'node' && hasSignal(el.tags) && <SignalPlanEditor nodeId={sel.id} />}
+      {kind === 'way' && isParkingArea(el as OsmWay) && <ParkingEditor way={el as OsmWay} />}
+      {kind === 'way' && (isTram(el as OsmWay) || !!el.tags.highway) && <LevelEditor way={el as OsmWay} />}
       {kind === 'way' && isTram(el as OsmWay) && (
         <div className="note strong">Трамвайные пути (railway=tram). В экспорт для симулятора попадают вместе с дорогами.</div>
       )}
-      {kind === 'way' && !isTram(el as OsmWay) && (
+      {kind === 'way' && !isTram(el as OsmWay) && !isParkingArea(el as OsmWay) && (
         <>
           <div className="row">
             <label>Класс

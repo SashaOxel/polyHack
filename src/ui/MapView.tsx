@@ -8,15 +8,18 @@ import { GROUP_COLORS, readPlan, turnsAt } from '../core/signals'
 import type { Layers } from './layers'
 import { GLOW_CLASSES, PALETTES, type Theme } from './theme'
 import { traffic } from './trafficController'
-import { isStopPlatform, linkedStop, nearestWayNode, stopsAt } from '../core/stops'
-import { placeBusStop, drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
-import { hasCrossing, hasSignal, isDrivable, isTram, laneInfo, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
+import { routeUi } from './routeUi'
+import { readRoute, resolveStop, type RouteStop } from '../core/routes'
+import { linkStopToNode } from '../core/ops'
+import { isStopPlatform, linkedStop, nearestFreeRoadNode, nearestWayNode, stopsAt } from '../core/stops'
+import { drawArea, placeBusStop, drawRoad, placeRoadFeature, insertNodeOnWay, mergeNodes, moveNode, type DrawPoint } from '../core/ops'
+import { hasCrossing, hasSignal, isDrivable, isParkingArea, isTram, laneInfo, wayLevel, onewayDirection, roadStyle, speedLimit, wayMidpoint } from '../core/roads'
 import { store } from '../core/store'
 import type { OsmWay, Tags } from '../core/types'
 import type { Issue } from '../validate'
 import { drawTiles, type View } from './tiles'
 
-export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'stop'
+export type Tool = 'select' | 'draw' | 'node' | 'signal' | 'crossing' | 'stop' | 'parking'
 
 interface Props {
   tileUrl: string
@@ -49,6 +52,8 @@ interface RenderCache {
   lanes: Map<number, ReturnType<typeof laneInfo>>
   linkedPlatforms: Set<number>
   stopPlatforms: number[]
+  parkings: OsmWay[]
+  parkingNodes: number[]
 }
 let renderCache: RenderCache | null = null
 function getRenderCache(): RenderCache {
@@ -59,9 +64,11 @@ function getRenderCache(): RenderCache {
   const box = new Map<number, [number, number, number, number]>()
   const ways: OsmWay[] = [], trams: OsmWay[] = []
   const lanes = new Map<number, ReturnType<typeof laneInfo>>()
+  const parkings: OsmWay[] = []
   for (const w of doc.ways.values()) {
     const tram = isTram(w)
-    if (!w.tags.highway && !tram) continue
+    const parking = isParkingArea(w)
+    if (!w.tags.highway && !tram && !parking) continue
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
     for (const id of w.nodes) {
       const m = merc.get(id)
@@ -69,7 +76,8 @@ function getRenderCache(): RenderCache {
       if (m.x < x0) x0 = m.x; if (m.x > x1) x1 = m.x; if (m.y < y0) y0 = m.y; if (m.y > y1) y1 = m.y
     }
     box.set(w.id, [x0, y0, x1, y1])
-    if (tram) trams.push(w)
+    if (parking) parkings.push(w)
+    else if (tram) trams.push(w)
     else { ways.push(w); lanes.set(w.id, laneInfo(w)) }
   }
   // порядок: пешеходные → служебные → основные (по толщине линии класса)
@@ -77,7 +85,8 @@ function getRenderCache(): RenderCache {
   const linkedPlatforms = new Set<number>()
   for (const r of doc.relations.values()) { const st = linkedStop(r); if (st) linkedPlatforms.add(st.platform) }
   const stopPlatforms = [...doc.nodes.values()].filter((n) => isStopPlatform(n.tags)).map((n) => n.id)
-  renderCache = { docVersion: store.docVersion, doc, merc, box, ways, trams, lanes, linkedPlatforms, stopPlatforms }
+  const parkingNodes = [...doc.nodes.values()].filter((n) => n.tags.amenity === 'parking').map((n) => n.id)
+  renderCache = { docVersion: store.docVersion, doc, merc, box, ways, trams, lanes, linkedPlatforms, stopPlatforms, parkings, parkingNodes }
   return renderCache
 }
 
@@ -269,6 +278,42 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       return li ? Math.max(base, li.total * laneW) : Math.max(base, 1.8 * ppm)
     }
 
+    // парковки: площадь с буквой P (под дорогами)
+    if (L.parking) {
+      const fill = pal.glow ? 'rgba(56,189,248,0.14)' : 'rgba(37,99,235,0.12)', edge = pal.glow ? 'rgba(56,189,248,0.6)' : 'rgba(37,99,235,0.55)'
+      ctx.save()
+      ctx.lineWidth = 1.5
+      for (const pk of cache.parkings) {
+        if (!onScreen(pk)) continue
+        const pts = pk.nodes.map(pos).filter((p): p is { x: number; y: number } => !!p)
+        if (pts.length < 3) continue
+        ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath()
+        const under = pk.tags.parking === 'underground'
+        ctx.fillStyle = fill; ctx.fill()
+        ctx.setLineDash(under ? [5, 4] : []); ctx.strokeStyle = edge; ctx.stroke(); ctx.setLineDash([])
+        // «P» в центре, если площадь заметна на экране
+        let cx = 0, cy = 0, x0 = Infinity, x1 = -Infinity
+        for (const p of pts) { cx += p.x; cy += p.y; x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x) }
+        cx /= pts.length; cy /= pts.length
+        if (x1 - x0 > 22) {
+          const r = Math.min(11, (x1 - x0) / 4)
+          ctx.fillStyle = pal.glow ? '#0284c7' : '#2563eb'
+          ctx.beginPath(); ctx.roundRect(cx - r, cy - r, r * 2, r * 2, r * 0.3); ctx.fill()
+          ctx.fillStyle = '#fff'; ctx.font = `700 ${Math.round(r * 1.3)}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText(under ? 'P↓' : pk.tags.parking === 'multi-storey' ? 'P≡' : 'P', cx, cy + 0.5)
+        }
+      }
+      for (const id of cache.parkingNodes) {
+        const p = pos(id)
+        if (!p || p.x < -10 || p.y < -10 || p.x > w + 10 || p.y > h + 10) continue
+        ctx.fillStyle = pal.glow ? '#0284c7' : '#2563eb'
+        ctx.beginPath(); ctx.roundRect(p.x - 8, p.y - 8, 16, 16, 3); ctx.fill()
+        ctx.fillStyle = '#fff'; ctx.font = '700 11px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+        ctx.fillText('P', p.x, p.y + 0.5)
+      }
+      ctx.restore()
+    }
+
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
     const sel = store.selection
@@ -297,7 +342,8 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       // тёмная тема: магистрали светятся (широкая полупрозрачная обводка вместо дорогого размытия)
       const glowing = pal.glow && !lanesVisible && GLOW_CLASSES.has(way.tags.highway ?? '')
 
-      if (!lanesVisible && !way.tags.bridge) {
+      const level = wayLevel(way)
+      if (!lanesVisible && level === 'ground') {
         const width = Math.round(W * 2) / 2
         const key = `${roadColor}|${width}|${drivable ? 0 : 1}|${glowing ? 1 : 0}`
         if (key !== batch.key) { flush(); ctx.beginPath(); batch = { key, width, color: roadColor, dash: !drivable, glow: glowing } }
@@ -309,7 +355,19 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
         ctx.lineWidth = W
         ctx.strokeStyle = roadColor
         if (!drivable) ctx.setLineDash([3, 3]); else ctx.setLineDash([])
-        if (way.tags.bridge) { ctx.save(); ctx.lineWidth += 3; ctx.strokeStyle = '#333'; ctx.stroke(); ctx.restore() }
+        if (level === 'bridge') {
+          // мост: заметный кант с обеих сторон (видно и у тонкой пешеходной дорожки)
+          ctx.save(); ctx.setLineDash([]); ctx.lineCap = 'butt'
+          ctx.lineWidth = W + 6; ctx.strokeStyle = pal.glow ? '#cbd5e1' : '#1f2937'; ctx.stroke()
+          ctx.lineWidth = W + 3; ctx.strokeStyle = pal.mapBg; ctx.stroke()
+          ctx.restore()
+        } else if (level === 'tunnel') {
+          // тоннель: пунктирный кант и бледная дорога
+          ctx.save(); ctx.setLineDash([4, 3]); ctx.lineCap = 'butt'
+          ctx.lineWidth = W + 4; ctx.strokeStyle = pal.glow ? 'rgba(203,213,225,0.7)' : 'rgba(31,41,55,0.6)'; ctx.stroke()
+          ctx.restore()
+          ctx.globalAlpha = 0.45
+        }
         if (lanesVisible) {
           // крупный план: цветной кант класса дороги и «асфальт» внутри, чтобы разметка читалась на любом цвете
           ctx.save(); ctx.lineWidth = W + 4; ctx.stroke(); ctx.restore()
@@ -318,6 +376,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
         if (glowing) { ctx.save(); ctx.globalAlpha = 0.25; ctx.lineWidth = W + 7; ctx.stroke(); ctx.restore() }
         ctx.stroke()
         ctx.setLineDash([])
+        ctx.globalAlpha = 1
 
         // разметка: пунктир между полосами; встречная линия двусторонней дороги жёлтая
         if (lanesVisible && li!.total >= 2) {
@@ -435,7 +494,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
 
     // рисуемая дорога: уже поставленные точки и «резинка» до курсора
     const tool = props.current.tool
-    if (tool === 'draw') {
+    if (tool === 'draw' || tool === 'parking') {
       const pts = draft.current.map(pointLatLon).filter((p): p is { lat: number; lon: number } => !!p)
         .map((p) => toScreen(p.lat, p.lon, w, h))
       const hv = hover.current
@@ -455,7 +514,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       }
     }
     // маркер привязки: зелёный — узел, синий — точка на дороге
-    if (tool !== 'select' && hover.current) {
+    if (tool !== 'select' && tool !== 'parking' && hover.current) {
       const hv = hover.current
       if (hv.snap) {
         const p = toScreen(hv.snap.lat, hv.snap.lon, w, h)
@@ -549,6 +608,71 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
       }
       ctx.restore()
     }
+    // маршрут общественного транспорта: черновик или выбранный в списке
+    {
+      const rd = routeUi.draft
+      const rel = !rd && routeUi.selected !== undefined ? doc.relations.get(routeUi.selected) : undefined
+      const info = rd ? { ...rd, editable: true, ways: [] as number[] } : rel ? readRoute(doc, rel) : undefined
+      if (info) {
+        const casing = pal.glow ? 'rgba(7,13,24,0.92)' : 'rgba(255,255,255,0.95)'
+        const lines: { x: number; y: number }[][] = []
+        const path = info.editable ? routeUi.path(info.stops, info.kind) : undefined
+        if (path && path.nodes.length > 1) lines.push(path.nodes.map(pos).filter((p): p is { x: number; y: number } => !!p))
+        else if (!info.editable) for (const wid of info.ways) { const wy = doc.ways.get(wid); if (wy) lines.push(wy.nodes.map(pos).filter((p): p is { x: number; y: number } => !!p)) }
+        ctx.save()
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+        for (const [color, width] of [[casing, 12], [info.colour, 6]] as const) {
+          ctx.strokeStyle = color; ctx.lineWidth = width
+          ctx.beginPath()
+          for (const ln of lines) ln.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)))
+          ctx.stroke()
+        }
+        // стрелки направления движения по маршруту
+        ctx.fillStyle = '#ffffff'
+        for (const ln of lines) {
+          let acc = 0
+          for (let i = 1; i < ln.length; i++) {
+            const a = ln[i - 1], b = ln[i]
+            const seg = Math.hypot(b.x - a.x, b.y - a.y)
+            acc += seg
+            if (acc < 90 || seg < 1) continue
+            acc = 0
+            const ang = Math.atan2(b.y - a.y, b.x - a.x), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+            ctx.save(); ctx.translate(mx, my); ctx.rotate(ang)
+            ctx.beginPath(); ctx.moveTo(3.5, 0); ctx.lineTo(-2.5, -3); ctx.lineTo(-2.5, 3); ctx.closePath(); ctx.fill()
+            ctx.restore()
+          }
+        }
+        // остановки по порядку
+        info.stops.forEach((st, i) => {
+          const p = pos(st.node)
+          if (!p) return
+          const broken = path?.broken.includes(i) || path?.broken.includes(i - 1)
+          ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, 7)
+          ctx.fillStyle = pal.glow ? '#0b1324' : '#ffffff'; ctx.fill()
+          ctx.lineWidth = 3; ctx.strokeStyle = broken ? '#ef4444' : info.colour; ctx.stroke()
+          ctx.fillStyle = pal.glow ? '#e2e8f0' : '#111827'
+          ctx.font = '700 11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText(String(i + 1), p.x, p.y + 0.5)
+        })
+        ctx.restore()
+      }
+      // при выборе трамвайных остановок показываем узлы-остановки на путях
+      if (rd && routeUi.picking && rd.kind === 'tram') {
+        ctx.save()
+        for (const tw of cache.trams) for (const id of tw.nodes) {
+          const n = doc.nodes.get(id)
+          if (!n || (n.tags.railway !== 'tram_stop' && n.tags.public_transport !== 'stop_position')) continue
+          const p = pos(id)
+          if (!p) continue
+          ctx.fillStyle = pal.stop; ctx.fillRect(p.x - 8, p.y - 8, 16, 16)
+          ctx.fillStyle = '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText('Т', p.x, p.y + 0.5)
+        }
+        ctx.restore()
+      }
+    }
+
     // направления выбранного светофора с планом — стрелки в цветах сигнальных групп (как в панели)
     if (sel?.kind === 'node') {
       const sn = doc.nodes.get(sel.id)
@@ -687,6 +811,55 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     })
   }
 
+  /** Режим «Маршруты → Выбирать на карте»: клик добавляет остановку в черновик маршрута. */
+  function pickRouteStop(sx: number, sy: number, w: number, h: number) {
+    const d = routeUi.draft!
+    const doc = store.doc
+    const cache = getRenderCache()
+    const v = view.current
+    const near = (ids: Iterable<number>) => {
+      let best: { id: number; dd: number } | undefined
+      for (const id of ids) {
+        const m = cache.merc.get(id)
+        if (!m) continue
+        const x = (m.x - v.cx) * v.scale + w / 2, y = (v.cy - m.y) * v.scale + h / 2
+        const dd = Math.hypot(x - sx, y - sy)
+        if (dd <= 14 && (!best || dd < best.dd)) best = { id, dd }
+      }
+      return best?.id
+    }
+    let stop: RouteStop | undefined
+    if (d.kind === 'bus') {
+      const platform = near(cache.stopPlatforms)
+      if (platform !== undefined) {
+        stop = resolveStop(doc, platform, 'bus')
+        if (!stop) {
+          // остановка из файла ещё не привязана к дороге — привязываем к ближайшему свободному узлу
+          const n = doc.nodes.get(platform)!
+          const anchor = nearestFreeRoadNode(doc, n.lat, n.lon)
+          if (anchor !== undefined) {
+            try { linkStopToNode(store, platform, anchor); stop = resolveStop(store.doc, platform, 'bus') } catch (e) { props.current.onHint((e as Error).message) }
+          }
+        }
+      } else {
+        const s = snap(sx, sy, w, h)
+        const id = s?.kind === 'node' ? s.id : s?.kind === 'way' ? nearestWayNode(doc, s.wayId, s.lat, s.lon) : undefined
+        if (id !== undefined) stop = resolveStop(doc, id, 'bus')
+      }
+    } else {
+      const ids: number[] = []
+      for (const tw of cache.trams) ids.push(...tw.nodes)
+      const id = near(ids)
+      if (id !== undefined) stop = resolveStop(doc, id, 'tram')
+    }
+    if (stop) {
+      routeUi.addStop(stop)
+      props.current.onHint(`Остановка ${routeUi.draft?.stops.length}: ${stop.name}. Следующая — кликом, Esc — закончить выбор`)
+    } else {
+      props.current.onHint(d.kind === 'bus' ? 'Кликните по остановке «А» или по дороге' : 'Кликните по трамвайным путям (узел остановки)')
+    }
+  }
+
   // ----- поиск объекта под курсором -----
   function pick(sx: number, sy: number, w: number, h: number) {
     const doc = store.doc
@@ -735,6 +908,18 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     }
     if (bestN) return { kind: 'node' as const, id: bestN.id }
     if (bestW) return { kind: 'way' as const, id: bestW.id, at: fromScreen(bestW.x, bestW.y, w, h) }
+    // клик внутри парковки
+    if (props.current.layers.parking) {
+      const c = getRenderCache()
+      for (const pk of c.parkings) {
+        const pts = pk.nodes.map((id) => doc.nodes.get(id)).filter((n): n is NonNullable<typeof n> => !!n).map((n) => toScreen(n.lat, n.lon, w, h))
+        let inside = false
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+          if ((pts[i].y > sy) !== (pts[j].y > sy) && sx < ((pts[j].x - pts[i].x) * (sy - pts[i].y)) / (pts[j].y - pts[i].y) + pts[i].x) inside = !inside
+        }
+        if (inside) return { kind: 'way' as const, id: pk.id, at: fromScreen(sx, sy, w, h) }
+      }
+    }
     return null
   }
 
@@ -810,6 +995,14 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
   function finishDraft() {
     const pts = draft.current
     draft.current = []
+    if (props.current.tool === 'parking') {
+      try {
+        const id = drawArea(store, pts.map((p) => pointLatLon(p)).filter((p): p is { lat: number; lon: number } => !!p), props.current.drawTags)
+        store.select({ kind: 'way', id })
+        props.current.onHint(`Парковка создана (${pts.length} точек). Ctrl+Z — отменить`)
+      } catch (e) { props.current.onHint((e as Error).message); redraw() }
+      return
+    }
     if (pts.length < 2) { props.current.onHint('Нужно минимум две точки — дорога не создана'); redraw(); return }
     const id = drawRoad(store, pts, props.current.drawTags)
     if (id) {
@@ -819,7 +1012,8 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
   }
 
   function addDraftPoint(sx: number, sy: number, w: number, h: number) {
-    const s = snap(sx, sy, w, h)
+    // контур парковки не цепляется к дорогам: площадь — отдельный объект
+    const s = props.current.tool === 'parking' ? null : snap(sx, sy, w, h)
     const ll = fromScreen(sx, sy, w, h)
     const pt: DrawPoint = s
       ? s.kind === 'node' ? { kind: 'node', id: s.id } : { kind: 'way', wayId: s.wayId, lat: s.lat, lon: s.lon }
@@ -908,6 +1102,8 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
         } else {
           moveNode(store, p.id, p.lat, p.lon)
         }
+      } else if (!d.moved && routeUi.picking && routeUi.draft) {
+        pickRouteStop(sx, sy, r.width, r.height)
       } else if (!d.moved) {
         const tool = props.current.tool
         if (tool === 'select') {
@@ -915,7 +1111,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
           // знак скорости появится в точке клика по дороге
           signAt.current = hit?.kind === 'way' ? { wayId: hit.id, lat: hit.at.lat, lon: hit.at.lon } : null
           store.select(hit ? { kind: hit.kind, id: hit.id } : null)
-        } else if (tool === 'draw') {
+        } else if (tool === 'draw' || tool === 'parking') {
           addDraftPoint(sx, sy, r.width, r.height)
         } else if (tool === 'stop') {
           const anchor = stopAnchor.current
@@ -1006,6 +1202,8 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
 
   // демо-движение: перерисовка на каждый кадр
   useEffect(() => traffic.onFrame(redrawCars), []) // eslint-disable-line react-hooks/exhaustive-deps
+  // маршруты: черновик, выбранный маршрут, режим выбора остановок
+  useEffect(() => routeUi.subscribe(redraw), []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // новый файл → показать всю карту
   const lastFile = useRef('')
@@ -1047,8 +1245,10 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
     draft.current = []
     hover.current = null
     redraw()
-    if (tool !== 'draw') return
-    props.current.onHint('Рисование дороги: кликайте по карте. Клик по узлу присоединяет, клик по дороге делает перекрёсток')
+    if (tool !== 'draw' && tool !== 'parking') return
+    props.current.onHint(tool === 'parking'
+      ? 'Парковка: обведите площадь кликами. Закончить — клик по последней точке или Enter'
+      : 'Рисование дороги: кликайте по карте. Клик по узлу присоединяет, клик по дороге делает перекрёсток')
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return
@@ -1067,7 +1267,7 @@ export function MapView({ tileUrl, issues, layers, theme, focus, tool, drawTags,
 
   return (
     <div className="map-wrap">
-      <canvas ref={canvas} className={tool === 'select' ? 'map' : 'map tool'} />
+      <canvas ref={canvas} className={tool === 'select' && !routeUi.picking ? 'map' : 'map tool'} />
       <canvas ref={dynCanvas} className="map-dyn" aria-hidden="true" />
 
       <div className="zoom-ctl">

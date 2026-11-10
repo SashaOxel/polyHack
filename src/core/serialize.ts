@@ -1,5 +1,5 @@
 import { linkedStop } from './stops'
-import { DRIVABLE, PEDESTRIAN, isTram } from './roads'
+import { DRIVABLE, PEDESTRIAN, isParkingArea, isTram } from './roads'
 import type { Meta, OsmDocument, OsmNode, OsmRelation, OsmWay, Tags } from './types'
 
 export interface ExportOptions {
@@ -32,6 +32,8 @@ export function selectForExport(doc: OsmDocument, opts: ExportOptions) {
   const used = new Set<number>()
   for (const w of doc.ways.values()) {
     const hw = w.tags.highway
+    // парковки — тоже часть транспортной инфраструктуры
+    if (isParkingArea(w)) { ways.push(w); for (const n of w.nodes) used.add(n); continue }
     // трамвайные пути — часть транспортной сети (SUMO импортирует railway=tram)
     if (!hw && !isTram(w)) continue
     if (isTram(w) || DRIVABLE.has(hw!) || (opts.includePedestrian && PEDESTRIAN.has(hw!))) {
@@ -48,10 +50,21 @@ export function selectForExport(doc: OsmDocument, opts: ExportOptions) {
       relations.push(r)
       continue
     }
+    // маршруты общественного транспорта, созданные в редакторе: целиком, если все дороги попали в выгрузку
+    if (r.tags['polyhack:route'] === 'yes' && r.tags.type === 'route') {
+      const ways = r.members.filter((m) => m.type === 'way')
+      if (ways.every((m) => wayIds.has(m.ref))) {
+        for (const m of r.members) if (m.type === 'node' && doc.nodes.has(m.ref)) used.add(m.ref)
+        relations.push(r)
+      }
+      continue
+    }
     if (r.tags.type !== 'restriction') continue
     const ok = r.members.every((m) => (m.type === 'way' ? wayIds.has(m.ref) : m.type === 'node' ? used.has(m.ref) : false))
     if (ok) relations.push(r)
   }
+  // парковки-точки (amenity=parking на узле)
+  for (const n of doc.nodes.values()) if (n.tags.amenity === 'parking') used.add(n.id)
   const nodes = [...used].map(id => doc.nodes.get(id)).filter((n): n is OsmNode => !!n)
   return { nodes, ways, relations }
 }

@@ -1,4 +1,5 @@
 import { distanceM } from './geo'
+import { isDrivable } from './roads'
 import type { OsmDocument, OsmRelation, Tags } from './types'
 
 /** Stops placed by this editor share a road node and one passenger platform. */
@@ -43,6 +44,26 @@ export function nearestWayNode(doc: OsmDocument, wayId: number, lat: number, lon
     if (!n) continue
     const d = distanceM(lat, lon, n.lat, n.lon)
     if (!best || d < best.d) best = { id, d }
+  }
+  return best?.id
+}
+
+/** Ближайший узел дороги для машин, к которому ещё не привязана остановка. */
+export function nearestFreeRoadNode(doc: OsmDocument, lat: number, lon: number): number | undefined {
+  const anchors = new Set<number>()
+  for (const r of doc.relations.values()) { const s = linkedStop(r); if (s) anchors.add(s.anchor) }
+  let best: { id: number; d: number } | undefined
+  const seen = new Set<number>()
+  for (const w of doc.ways.values()) {
+    if (!isDrivable(w)) continue
+    for (const id of w.nodes) {
+      if (seen.has(id) || anchors.has(id)) continue
+      seen.add(id)
+      const n = doc.nodes.get(id)
+      if (!n) continue
+      const d = distanceM(lat, lon, n.lat, n.lon)
+      if (!best || d < best.d) best = { id, d }
+    }
   }
   return best?.id
 }

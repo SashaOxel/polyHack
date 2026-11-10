@@ -186,7 +186,37 @@ export const HIGHWAY_LABELS: Record<string, string> = {
 /** Человеческое название дороги: «Жилая улица», «Пешеходный переход», «Трамвайные пути». */
 export function wayKindLabel(w: OsmWay): string {
   if (isTram(w)) return 'Трамвайные пути'
+  if (w.tags.amenity === 'parking') return 'Парковка'
+  if (w.tags.highway === 'footway' && wayLevel(w) === 'bridge') return 'Надземный переход'
+  if (w.tags.highway === 'footway' && wayLevel(w) === 'tunnel') return 'Подземный переход'
   if (w.tags.highway === 'footway' && w.tags.footway === 'crossing') return 'Пешеходный переход'
   const hw = w.tags.highway
   return hw ? HIGHWAY_LABELS[hw] ?? hw : 'Линия'
 }
+
+// ---------- уровень: мост / тоннель / земля ----------
+
+/** Значения tunnel=*, которые НЕ под землёй: проход сквозь здание, галерея от лавин. */
+const NOT_UNDERGROUND = new Set(['no', 'building_passage', 'avalanche_protector'])
+
+export type WayLevel = 'ground' | 'bridge' | 'tunnel'
+
+/** Мост (bridge=*), тоннель (tunnel=yes/culvert/…) или на земле. Проход через здание — на земле. */
+export function wayLevel(w: { tags: Tags }): WayLevel {
+  const b = w.tags.bridge, t = w.tags.tunnel
+  if (b !== undefined && b !== 'no') return 'bridge'
+  if (t !== undefined && !NOT_UNDERGROUND.has(t)) return 'tunnel'
+  return 'ground'
+}
+
+// ---------- парковки ----------
+
+/** Парковка-площадь: замкнутый контур amenity=parking. */
+export const isParkingArea = (w: OsmWay) => w.tags.amenity === 'parking' && w.nodes.length >= 4 && w.nodes[0] === w.nodes[w.nodes.length - 1]
+
+export const PARKING_TYPES: { key: string; label: string }[] = [
+  { key: 'surface', label: 'Наземная' },
+  { key: 'underground', label: 'Подземная' },
+  { key: 'multi-storey', label: 'Многоуровневая' },
+  { key: 'street_side', label: 'Вдоль дороги' },
+]

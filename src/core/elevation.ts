@@ -1,4 +1,5 @@
 import { distanceM } from './geo'
+import { wayLevel } from './roads'
 import type { OsmDocument, OsmNode, OsmWay } from './types'
 
 /**
@@ -42,7 +43,7 @@ export interface ElevationContext {
 export function elevationContext(doc: OsmDocument): ElevationContext {
   const levelCount = new Map<number, number>()
   for (const w of doc.ways.values()) {
-    if (!isOn(w.tags.bridge) && !isOn(w.tags.tunnel)) continue
+    if (wayLevel(w) === 'ground') continue
     for (const id of new Set(w.nodes)) levelCount.set(id, (levelCount.get(id) ?? 0) + 1)
   }
   return { levelCount }
@@ -68,7 +69,8 @@ function interpolate(d: number[], ele: (number | undefined)[]): number[] {
  * null, если дорога не на другом уровне.
  */
 function levelProfile(way: OsmWay, total: number, ctx?: ElevationContext): ((d: number) => number) | null {
-  const bridge = isOn(way.tags.bridge), tunnel = isOn(way.tags.tunnel)
+  const kind = wayLevel(way)
+  const bridge = kind === 'bridge', tunnel = kind === 'tunnel'
   if ((!bridge && !tunnel) || total < 1) return null
   const layer = parseInt(way.tags.layer ?? '', 10)
   const level = bridge ? (layer > 0 ? layer : 1) : -(layer < 0 ? -layer : 1)

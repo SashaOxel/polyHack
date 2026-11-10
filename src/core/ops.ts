@@ -2,6 +2,7 @@ import { isStopPlatform, linkedStop, nearestWayNode, stopsAt } from './stops'
 import { isDrivable } from './roads'
 import { cumulativeDistance } from './elevation'
 import { writePlan, type SignalPlan } from './signals'
+import { buildRouteRelation, type RouteDraft } from './routes'
 import { nearestOnSegment, project, unproject } from './geo'
 import type { Store, Tx } from './store'
 import type { OsmDocument, OsmRelation, OsmWay, Tags } from './types'
@@ -458,4 +459,64 @@ export function setSignalPlan(store: Store, nodeId: number, plan: SignalPlan | n
   const n = store.doc.nodes.get(nodeId)
   if (!n) return
   store.commit(plan ? 'Изменить план светофора' : 'Удалить план светофора', (tx) => tx.setNode({ ...n, tags: writePlan(n.tags, plan) }))
+}
+
+// ---------- маршруты общественного транспорта ----------
+
+/**
+ * Создать или обновить маршрут (relation route=bus|tram). Путь между остановками строится автоматически;
+ * если между какими-то соседними остановками пути нет — ошибка с номерами остановок.
+ */
+export function saveRoute(store: Store, draft: RouteDraft, routeId?: number): number {
+  if (!draft.ref.trim()) throw new Error('Укажите номер маршрута')
+  if (draft.stops.length < 2) throw new Error('Нужно минимум две остановки')
+  const old = routeId !== undefined ? store.doc.relations.get(routeId) : undefined
+  let id = routeId ?? 0
+  const probe = buildRouteRelation(store.doc, id, draft)
+  if (probe.path.broken.length) {
+    const legs = probe.path.broken.map((i) => `${i + 1}→${i + 2}`).join(', ')
+    throw new Error(`Нет пути ${draft.kind === 'tram' ? 'по трамвайным путям' : 'по дорогам (с учётом одностороннего движения)'} между остановками ${legs}`)
+  }
+  store.commit(old ? `Изменить маршрут ${draft.ref}` : `Создать маршрут ${draft.ref}`, (tx) => {
+    if (!old) id = tx.newId()
+    // свои посторонние теги (если были) сохраняем
+    const keep: Tags = {}
+    if (old) for (const [k, v] of Object.entries(old.tags)) if (!['name', 'from', 'to', 'colour'].includes(k)) keep[k] = v
+    tx.setRelation({ ...buildRouteRelation(store.doc, id, draft, keep).relation, meta: old?.meta ?? {} })
+  })
+  return id
+}
+
+export function deleteRoute(store: Store, routeId: number) {
+  if (!store.doc.relations.has(routeId)) return
+  store.commit('Удалить маршрут', (tx) => tx.deleteRelation(routeId))
+}
+
+// ---------- площади (парковки) и уровень дороги ----------
+
+/** Нарисовать замкнутую площадь (например, парковку) по точкам: новые узлы + замкнутый контур. */
+export function drawArea(store: Store, points: { lat: number; lon: number }[], tags: Tags): number {
+  if (points.length < 3) throw new Error('Нужно минимум три точки')
+  let wayId = 0
+  store.commit(tags.amenity === 'parking' ? 'Добавить парковку' : 'Добавить площадь', (tx) => {
+    const ids = points.map((p) => {
+      const id = tx.newId()
+      tx.setNode({ id, lat: p.lat, lon: p.lon, tags: {}, meta: {} })
+      return id
+    })
+    wayId = tx.newId()
+    tx.setWay({ id: wayId, nodes: [...ids, ids[0]], tags: { ...tags }, meta: {} })
+  })
+  return wayId
+}
+
+/** Сделать дорогу мостом, тоннелем или вернуть на землю (теги bridge/tunnel/layer). */
+export function setWayLevel(store: Store, wayId: number, level: 'ground' | 'bridge' | 'tunnel', layer?: number) {
+  const w = store.doc.ways.get(wayId)
+  if (!w) return
+  const tags = { ...w.tags }
+  delete tags.bridge; delete tags.tunnel; delete tags.layer
+  if (level === 'bridge') { tags.bridge = 'yes'; tags.layer = String(layer && layer > 0 ? layer : 1) }
+  if (level === 'tunnel') { tags.tunnel = 'yes'; tags.layer = String(layer && layer < 0 ? layer : -1) }
+  store.commit(level === 'bridge' ? 'Сделать мостом' : level === 'tunnel' ? 'Сделать тоннелем' : 'Вернуть на землю', (tx) => tx.setWay({ ...w, tags }))
 }

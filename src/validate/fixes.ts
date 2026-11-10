@@ -1,4 +1,5 @@
-import { deleteRelation, deleteWays, linkStopToNode, mergeNodes } from '../core/ops'
+import { deleteRelation, deleteWays, linkStopToNode, mergeNodes, saveRoute } from '../core/ops'
+import { readRoute } from '../core/routes'
 import type { Store } from '../core/store'
 import type { Fix, Issue } from './index'
 
@@ -9,6 +10,7 @@ export function fixLabel(fix: Fix): string {
     case 'merge-nodes': return 'Склеить узлы'
     case 'delete-ways': return `Удалить участок (${fix.ids.length})`
     case 'link-stop': return `Привязать к узлу № ${fix.anchor}`
+    case 'rebuild-route': return 'Перестроить маршрут'
   }
 }
 
@@ -18,6 +20,13 @@ export function applyFix(store: Store, fix: Fix) {
     case 'delete-relation': return deleteRelation(store, fix.id)
     case 'merge-nodes': return mergeNodes(store, fix.keep, fix.remove)
     case 'delete-ways': return deleteWays(store, fix.ids)
+    case 'rebuild-route': {
+      const r = store.doc.relations.get(fix.id)
+      if (!r) return
+      const info = readRoute(store.doc, r)
+      try { saveRoute(store, { kind: info.kind, ref: info.ref, name: r.tags.name, colour: r.tags.colour, stops: info.stops }, fix.id) } catch { /* пути нет — останется ошибкой */ }
+      return
+    }
     case 'link-stop': {
       // остановка могла быть уже привязана другим исправлением или вручную — тогда ничего не делаем
       try { linkStopToNode(store, fix.platform, fix.anchor) } catch { /* узел занят или остановка уже привязана */ }

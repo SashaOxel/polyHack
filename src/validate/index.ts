@@ -3,6 +3,7 @@ import { analyze, buildGraph, waysOfGroup, type RoadGraph } from '../core/graph'
 import { isDrivable } from '../core/roads'
 import { isBusPlatform, linkedStop } from '../core/stops'
 import { checkPlan, readPlan, turnsAt } from '../core/signals'
+import { isRouteRelation, readRoute, routePath } from '../core/routes'
 import type { OsmDocument } from '../core/types'
 
 /**
@@ -18,6 +19,7 @@ export type Fix =
   | { kind: 'merge-nodes'; keep: number; remove: number }
   | { kind: 'delete-ways'; ids: number[] }
   | { kind: 'link-stop'; platform: number; anchor: number }
+  | { kind: 'rebuild-route'; id: number }
 
 export interface Issue {
   /** уникальный ключ проблемы */
@@ -232,7 +234,30 @@ const signalPlans: Check = (doc) => {
   return out
 }
 
-const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity, unlinkedStops, signalPlans]
+/** Маршруты, созданные в редакторе: путь между остановками есть и совпадает с дорогами маршрута. */
+const routes: Check = (doc) => {
+  const out: Issue[] = []
+  for (const r of doc.relations.values()) {
+    if (!isRouteRelation(r) || r.tags['polyhack:route'] !== 'yes') continue
+    const info = readRoute(doc, r)
+    const path = routePath(doc, info.kind, info.stops.map((s) => s.node))
+    const n = info.stops[0] && doc.nodes.get(info.stops[0].node)
+    const at = n ? { lat: n.lat, lon: n.lon } : undefined
+    const title = `Маршрут ${info.ref || r.id}`
+    if (info.stops.some((s) => !doc.nodes.has(s.node))) {
+      out.push({ id: `route-stop:${r.id}`, severity: 'error', code: 'route', message: `${title}: остановка удалена с карты`, at })
+    } else if (path.broken.length) {
+      out.push({ id: `route-broken:${r.id}`, severity: 'error', code: 'route', at,
+        message: `${title}: нет пути между остановками ${path.broken.map((i) => `${i + 1}→${i + 2}`).join(', ')}` })
+    } else if (path.ways.join(',') !== info.ways.join(',')) {
+      out.push({ id: `route-stale:${r.id}`, severity: 'warning', code: 'route', at, fix: { kind: 'rebuild-route', id: r.id },
+        message: `${title}: дороги изменились — маршрут стоит перестроить` })
+    }
+  }
+  return out
+}
+
+const CHECKS: Check[] = [missingNodes, brokenRelations, duplicateNodes, isolatedComponents, directedConnectivity, unlinkedStops, signalPlans, routes]
 
 export function validate(doc: OsmDocument): Issue[] {
   const graph = buildGraph(doc)

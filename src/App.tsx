@@ -3,7 +3,8 @@ import { deleteNode, deleteWay, reverseWay, splitAtNode } from './core/ops'
 import { parseOsm } from './core/parse'
 import { serializeOsm } from './core/serialize'
 import { store } from './core/store'
-import { DRAW_TEMPLATES, isFootTemplate, isRailTemplate } from './core/templates'
+import { DRAW_TEMPLATES, LEVEL_TAGS, isFootTemplate, isRailTemplate } from './core/templates'
+import { PARKING_TYPES } from './core/roads'
 import { hasErrors, validate, type Issue } from './validate'
 import { applyAutoFixes, applyFix } from './validate/fixes'
 import { AttributePanel } from './ui/AttributePanel'
@@ -16,13 +17,16 @@ import { DEFAULT_LAYERS, LAYER_LIST, type Layers } from './ui/layers'
 import { loadTheme, saveTheme, type Theme } from './ui/theme'
 import { TrafficPanel } from './ui/TrafficPanel'
 import { Dashboard } from './ui/Dashboard'
+import { RoutesPanel } from './ui/RoutesPanel'
+import { routeUi } from './ui/routeUi'
 
 // 3D грузится отдельным куском (three.js тяжёлый) — только когда откроют вкладку 3D
 const View3D = lazy(() => import('./ui/View3D'))
 
 export function App() {
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
-  const [tab, setTab] = useState<'attrs' | 'issues' | 'overview'>('attrs')
+  const [tab, setTab] = useState<'attrs' | 'issues' | 'overview' | 'routes'>('attrs')
+  useSyncExternalStore(routeUi.subscribe, routeUi.getVersion)
   const [layers, setLayers] = useState<Layers>(DEFAULT_LAYERS)
   const setLayer = (key: keyof Layers, on: boolean) => setLayers((l) => ({ ...l, [key]: on }))
   const [layersOpen, setLayersOpen] = useState(false)
@@ -42,6 +46,12 @@ export function App() {
   const [tool, setTool] = useState<Tool>('select')
   const [mode, setMode] = useState<'2d' | '3d'>('2d')
   const [tplIdx, setTplIdx] = useState(2)
+  // уровень новой дороги (на земле / мост / тоннель) и тип новой парковки
+  const [drawLevel, setDrawLevel] = useState<'ground' | 'bridge' | 'tunnel'>('ground')
+  const [parkType, setParkType] = useState('surface')
+  const drawTags = tool === 'parking'
+    ? { amenity: 'parking', parking: parkType }
+    : { ...DRAW_TEMPLATES[tplIdx].tags, ...(DRAW_TEMPLATES[tplIdx].tags.bridge || DRAW_TEMPLATES[tplIdx].tags.tunnel ? {} : LEVEL_TAGS[drawLevel]) }
 
   const load = useCallback((text: string, name: string) => {
     try {
@@ -107,7 +117,7 @@ export function App() {
       else if (mod && key === 's') { e.preventDefault(); save() }
       else if (mod && key === 'o') { e.preventDefault(); open() }
       else if (mod) return
-      else if (e.key === 'Escape') store.select(null) // в режиме рисования Esc ещё и отменяет черновик (MapView)
+      else if (e.key === 'Escape') { if (routeUi.picking) routeUi.setPicking(false); else store.select(null) } // в режиме рисования Esc ещё и отменяет черновик (MapView)
       // выбор инструмента
       else if (key === '2') setMode('2d')
       else if (key === '3') { setMode('3d'); setTool('select') }
@@ -117,6 +127,7 @@ export function App() {
       else if (key === 'n' && mode === '2d') setTool('node')
       else if (key === 't' && mode === '2d') setTool('signal')
       else if (key === 'c' && mode === '2d') setTool('crossing')
+      else if (key === 'p' && mode === '2d') setTool('parking')
       // действия над выбранным объектом (в режиме рисования Backspace убирает точку, а не удаляет)
       else if (sel?.kind === 'way' && key === 'r') reverseWay(store, sel.id)
       else if (sel?.kind === 'node' && key === 's') {
@@ -181,6 +192,7 @@ export function App() {
     { id: 'signal', icon: 'signal', label: 'Светофор', short: 'Светофор', key: 'T' },
     { id: 'stop', icon: 'bus', label: 'Автобусная остановка', short: 'Остановка', key: 'B' },
     { id: 'crossing', icon: 'crossing', label: 'Пешеходный переход на узле дороги', short: 'Переход', key: 'C' },
+    { id: 'parking', icon: 'parking', label: 'Парковка: обвести площадь', short: 'Парковка', key: 'P' },
   ]
 
   return (
@@ -212,6 +224,9 @@ export function App() {
           <button role="tab" aria-selected={mode === '3d'} className={mode === '3d' ? 'active' : ''}
             onClick={() => { setMode('3d'); setTool('select') }} title="3D (3)">3D</button>
         </div>
+
+        <button className={tab === 'routes' ? 'btn routes-btn on' : 'btn routes-btn'} onClick={() => setTab('routes')}
+          title="Маршруты автобусов и трамваев">🚌 Маршруты</button>
 
         <span className="spacer" />
 
@@ -246,7 +261,7 @@ export function App() {
           <div className="layer" style={{ display: mode === '2d' ? 'block' : 'none' }}>
             <MapView
               tileUrl={layers.tiles ? tileUrl : ''} issues={issues} layers={layers} theme={theme} focus={focus}
-              tool={tool} drawTags={DRAW_TEMPLATES[tplIdx].tags} onHint={setStatus}
+              tool={tool} drawTags={drawTags} onHint={setStatus}
               onStopCreated={() => setTool('select')}
             />
           </div>
@@ -285,6 +300,13 @@ export function App() {
             </div>
           )}
 
+          {mode === '2d' && routeUi.picking && routeUi.draft && (
+            <div className="tool-card route-card" style={{ borderColor: routeUi.draft.colour }}>
+              <b>{routeUi.draft.kind === 'tram' ? '🚋' : '🚌'} Маршрут {routeUi.draft.ref || 'без номера'}</b>
+              <span>Кликайте по остановкам по порядку ({routeUi.draft.stops.length} выбрано) · Esc — закончить выбор</span>
+            </div>
+          )}
+
           {mode === '2d' && tool === 'draw' && (
             <div className="tool-card">
               <b>Новая дорога</b>
@@ -299,7 +321,25 @@ export function App() {
                   {DRAW_TEMPLATES.map((t, i) => (isRailTemplate(t) ? <option key={t.name} value={i}>{t.name}</option> : null))}
                 </optgroup>
               </select>
+              {!(DRAW_TEMPLATES[tplIdx].tags.bridge || DRAW_TEMPLATES[tplIdx].tags.tunnel) && (
+                <div className="seg" role="radiogroup" aria-label="Уровень дороги">
+                  {([['ground', 'На земле'], ['bridge', '🌉 Мост'], ['tunnel', '🕳 Тоннель']] as const).map(([k, l]) => (
+                    <button key={k} role="radio" aria-checked={drawLevel === k} className={drawLevel === k ? 'active' : ''} onClick={() => setDrawLevel(k)}>{l}</button>
+                  ))}
+                </div>
+              )}
               <span>Клик — точка · по узлу или дороге — присоединить · Enter — закончить · Esc — отмена{isFootTemplate(DRAW_TEMPLATES[tplIdx]) ? ' · пешеходная дорога попадёт в .osm при включённой галочке «Добавить пешеходные»' : ''}</span>
+            </div>
+          )}
+          {mode === '2d' && tool === 'parking' && (
+            <div className="tool-card">
+              <b>🅿 Парковка</b>
+              <div className="seg" role="radiogroup" aria-label="Тип парковки">
+                {PARKING_TYPES.map((t) => (
+                  <button key={t.key} role="radio" aria-checked={parkType === t.key} className={parkType === t.key ? 'active' : ''} onClick={() => setParkType(t.key)}>{t.label}</button>
+                ))}
+              </div>
+              <span>Обведите площадь кликами · клик по последней точке или Enter — закончить · Esc — отмена · сохраняется в .osm (amenity=parking)</span>
             </div>
           )}
           {mode === '2d' && (tool === 'signal' || tool === 'crossing') && (
@@ -333,13 +373,14 @@ export function App() {
         <aside>
           <nav>
             <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Обзор</button>
+            <button className={tab === 'routes' ? 'active' : ''} onClick={() => setTab('routes')}>Маршруты</button>
             <button className={tab === 'attrs' ? 'active' : ''} onClick={() => setTab('attrs')}>Атрибуты</button>
             <button className={tab === 'issues' ? 'active' : ''} onClick={() => setTab('issues')}>
               Проблемы
               {issues.length > 0 && <span className={errCount ? 'badge err' : 'badge'}>{issues.length}</span>}
             </button>
           </nav>
-          {tab === 'overview' ? <Dashboard issues={issues} /> : tab === 'attrs' ? <AttributePanel /> : (
+          {tab === 'overview' ? <Dashboard issues={issues} /> : tab === 'routes' ? <RoutesPanel onHint={setStatus} /> : tab === 'attrs' ? <AttributePanel /> : (
             <IssuesPanel
               issues={issues} hiddenCount={allIssues.length - issues.length}
               onFocus={focusIssue} onFix={fixOne} onIgnore={ignoreOne} onFixAll={fixAll}

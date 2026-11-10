@@ -5,7 +5,7 @@ import { parseOsm } from './parse'
 import { reverseWay, moveNode, splitWayAt } from './ops'
 import { serializeOsm } from './serialize'
 import { validate } from '../validate'
-import { isDrivable } from './roads'
+import { isDrivable, isParkingArea } from './roads'
 
 const xml = readFileSync(new URL('../../data/example.osm', import.meta.url), 'utf8')
 
@@ -30,8 +30,8 @@ describe('parse / serialize', () => {
 
   it('экспорт «только дороги» оставляет проезжие дороги и их узлы', () => {
     const out = parseOsm(serializeOsm(doc, { onlyRoads: true, keepMeta: false }))
-    // дороги для машин + трамвайные пути (часть транспортной сети)
-    const drivable = [...doc.ways.values()].filter((w) => isDrivable(w) || w.tags.railway === 'tram').length
+    // дороги для машин + трамвайные пути + парковки (транспортная инфраструктура)
+    const drivable = [...doc.ways.values()].filter((w) => isDrivable(w) || w.tags.railway === 'tram' || isParkingArea(w)).length
     expect(out.ways.size).toBe(drivable)
     expect([...out.ways.values()].every((w) => w.nodes.every((n) => out.nodes.has(n)))).toBe(true)
     expect([...out.ways.values()].some((w) => w.tags.building)).toBe(false)

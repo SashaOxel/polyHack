@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { elevationContext, wayProfile } from '../core/elevation'
 import { dashPolyline, offsetPolyline, project } from '../core/geo'
-import { hasCrossing, hasSignal, isDrivable, isTram, laneInfo, roadStyle } from '../core/roads'
+import { hasCrossing, hasSignal, isDrivable, isParkingArea, isTram, laneInfo, roadStyle, wayLevel } from '../core/roads'
 import type { OsmDocument, OsmWay } from '../core/types'
 
 /**
@@ -133,7 +133,8 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
   const markBuf: Buf = { pos: [], col: [], idx: [] } // дорожная разметка: пунктир между полосами
   const white = new THREE.Color('#f6f6f2'), yellow = new THREE.Color('#ffd54f')
   const faceWay: number[] = []
-  const pillars: P[] = []
+  const pillars: (P & { r: number })[] = []
+  const tunnelBuf: Buf = { pos: [], col: [], idx: [] } // тоннели «на просвет» сквозь землю
   const crossings: { x: number; y: number; z: number; dx: number; dz: number; width: number }[] = []
   const crossingNodes = new Set<number>()
   const nodeY = new Map<number, number>()
@@ -171,16 +172,21 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
       })
     }
 
-    const isBridge = way.tags.bridge !== undefined && way.tags.bridge !== 'no'
-    if (isBridge && drivable) {
+    const level = wayLevel(way)
+    if (level === 'bridge') {
+      // любой мост — и автомобильный, и пешеходный (надземный переход): настил и опоры
       bridges++
-      addRibbon(slabBuf, pts.map((p) => ({ ...p, y: p.y - 0.7 })), roadWidth(way) + 0.8, slabColor)
-      // опоры: не чаще чем через ~25 м, только там, где мост заметно над землёй
+      const deck = drivable ? 0.7 : 0.35
+      addRibbon(slabBuf, pts.map((p) => ({ ...p, y: p.y - deck })), roadWidth(way) + (drivable ? 0.8 : 0.5), slabColor)
+      // опоры: не чаще чем через ~25 м (у пешеходных — 12 м и тоньше), только там, где мост заметно над землёй
+      const step = drivable ? 25 : 12
       let last = -Infinity, run = 0
       pts.forEach((p, i) => {
         if (i > 0) run += Math.hypot(p.x - pts[i - 1].x, p.z - pts[i - 1].z)
-        if (p.y > 1.5 && run - last >= 25) { pillars.push({ x: p.x, y: p.y - 0.7, z: p.z }); last = run }
+        if (p.y > 1.5 && run - last >= step) { pillars.push({ x: p.x, y: p.y - deck, z: p.z, r: drivable ? 1 : 0.4 }); last = run }
       })
+    } else if (level === 'tunnel') {
+      addRibbon(tunnelBuf, pts, roadWidth(way), new THREE.Color(drivable ? '#94a3b8' : '#c4b5fd'))
     }
   }
 
@@ -216,6 +222,45 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     root.add(new THREE.Mesh(toGeometry(slabBuf), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })))
   }
 
+  // ---- тоннели: полупрозрачно и поверх земли, чтобы было видно, где они проходят ----
+  if (tunnelBuf.idx.length) {
+    const tunnels = new THREE.Mesh(toGeometry(tunnelBuf), new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.38, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    }))
+    tunnels.renderOrder = 2
+    root.add(tunnels)
+  }
+
+  // ---- парковки: наземные — площадка, многоуровневые — объём, подземные — контур на просвет ----
+  const parkFlat: THREE.BufferGeometry[] = [], parkUnder: THREE.BufferGeometry[] = [], parkTall: THREE.BufferGeometry[] = []
+  for (const way of doc.ways.values()) {
+    if (!isParkingArea(way)) continue
+    const pts = way.nodes.slice(0, -1).map((id) => doc.nodes.get(id)).filter((n): n is NonNullable<typeof n> => !!n)
+    if (pts.length < 3) continue
+    const shape = new THREE.Shape(pts.map((n) => { const w = world(n.lat, n.lon); return new THREE.Vector2(w.x, -w.z) }))
+    const kind = way.tags.parking ?? 'surface'
+    if (kind === 'multi-storey') {
+      const levels = parseFloat(way.tags['building:levels'] ?? '') || 3
+      const g = new THREE.ExtrudeGeometry(shape, { depth: levels * 3, bevelEnabled: false })
+      g.rotateX(-Math.PI / 2); g.deleteAttribute('uv')
+      parkTall.push(g)
+    } else {
+      const g = new THREE.ShapeGeometry(shape)
+      g.rotateX(-Math.PI / 2); g.translate(0, kind === 'underground' ? 0.06 : 0.03, 0); g.deleteAttribute('uv')
+      ;(kind === 'underground' ? parkUnder : parkFlat).push(g)
+    }
+  }
+  const addMerged = (list: THREE.BufferGeometry[], mat: THREE.Material, shadow: boolean) => {
+    if (!list.length) return
+    const mesh = new THREE.Mesh(mergeGeometries(list, false), mat)
+    mesh.receiveShadow = true; mesh.castShadow = shadow
+    root.add(mesh)
+    list.forEach((g) => g.dispose())
+  }
+  addMerged(parkFlat, new THREE.MeshLambertMaterial({ color: night ? '#1e293b' : '#6b7280', side: THREE.DoubleSide }), false)
+  addMerged(parkUnder, new THREE.MeshBasicMaterial({ color: '#38bdf8', transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }), false)
+  addMerged(parkTall, new THREE.MeshLambertMaterial({ color: night ? '#3b4a63' : '#a3aab5' }), true)
+
   // ---- опоры мостов ----
   if (pillars.length) {
     const inst = new THREE.InstancedMesh(
@@ -223,7 +268,7 @@ export function buildScene(doc: OsmDocument, opts: BuildOptions): SceneData {
     )
     const m = new THREE.Matrix4()
     pillars.forEach((p, i) => {
-      m.compose(new THREE.Vector3(p.x, p.y / 2, p.z), new THREE.Quaternion(), new THREE.Vector3(1, Math.max(0.1, p.y), 1))
+      m.compose(new THREE.Vector3(p.x, p.y / 2, p.z), new THREE.Quaternion(), new THREE.Vector3(p.r, Math.max(0.1, p.y), p.r))
       inst.setMatrixAt(i, m)
     })
     root.add(inst)
